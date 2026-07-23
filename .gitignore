@@ -1,0 +1,54 @@
+# ===== Keil MDK Build Outputs =====
+*.uvguix.*
+*.uvoptx
+*.scvd
+*.Administrator
+JLinkLog.txt
+*.plg
+*.tra
+
+# ===== Compiled Objects & Listings =====
+*.o
+*.d
+*.crf
+*.d
+*.dep
+*.lnp
+*.axf
+*.htm
+*.lst
+*.map
+*.iex
+*.build_log.htm
+
+# ===== Keil Batch Files (auto-generated) =====
+*.BAT
+*.bat
+
+# ===== Debug / Release Output =====
+Debug/
+Release/
+DebugConfig/
+RTE/
+
+# ===== Preprocessor Output =====
+*.i
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+
+# ===== OS Files =====
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
