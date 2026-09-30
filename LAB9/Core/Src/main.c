@@ -1,8 +1,26 @@
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
+  * @file    main.c
+  * @brief   分拣器控制器（LAB9）
+  *
+  * 功能：
+  *   接收上位机下发的分拣指令，解析出四个方向各有哪些货物，
+  *   在 OLED 上以「上 / 下 / 左 / 右 + 货物名」四行显示。
+  *
+  * 下行报文（USART1，9600 8N1）：
+  *   {"Down":"GoodC,GoodD","Up":"GoodA","Left":"","Right":""}\r\n
+  *   货物名前的 "Good" 前缀不区分大小写，显示前会被去掉。
+  *
+  * 帧完整性判定：只有同时见到 '}' 与行结束符 '\n' 才认为一帧完整，
+  *               避免把半截 JSON 当成完整帧解析。
+  *
+  * USART2 作为调试输出口，上电打印一次 "UART READY"。
+  *
+  * 模块划分：
+  *   OLED/oled.c                 SSD1306 驱动（8x16 字符 + 16x16 汉字）
+  *   SOFT_I2C/soft_i2c.c         软件模拟 I²C
+  *   JSON_PARSER/json_parser.c   从 JSON 中取字段、去 "Good" 前缀
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -12,262 +30,103 @@
 #include "usart.h"
 #include "gpio.h"
 
-/* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "oled.h"
 #include "json_parser.h"
-#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
-#include <ctype.h>
 /* USER CODE END Includes */
 
 /* Private define ------------------------------------------------------------*/
+
 /* USER CODE BEGIN PD */
-#define RX_BUFFER_MAX 256
-#define USART2_RX_MAX 64
+/* 单帧最大长度，同时也是帧缓冲（双缓冲）的大小 */
+#define RX_BUFFER_MAX   256
 /* USER CODE END PD */
 
 /* Private variables ---------------------------------------------------------*/
+
 /* USER CODE BEGIN PV */
-extern UART_HandleTypeDef huart1;
-extern UART_HandleTypeDef huart2;
 
-uint8_t uart_rx_buf[RX_BUFFER_MAX] = {0};
-uint16_t rx_index = 0;
-uint8_t frame_finish_flag = 0;
-char    frame_buffer[RX_BUFFER_MAX] = {0};  /* 双缓冲: ISR拷贝完成帧,主循环读取 */
+/* ---- USART1 接收（中断写入） ---- */
+static uint8_t          rx_byte;                          /* 单字节接收缓冲 */
+static char             uart_rx_buf[RX_BUFFER_MAX];       /* 攒帧用，中断独占 */
+static uint16_t         rx_idx = 0;                       /* uart_rx_buf 写入位置 */
+static uint8_t          rx_saw_brace = 0;                 /* 本帧是否已见到 '}' */
 
-uint8_t uart2_rx_buf[USART2_RX_MAX] = {0};
-uint16_t uart2_rx_idx = 0;
-uint8_t uart2_frame_flag = 0;
-char cmd_buf[32];
-uint8_t uart2_temp_ch;
+/* ---- 双缓冲：中断把完整帧发布到这里，主循环读取 ---- */
+static char             frame_buffer[RX_BUFFER_MAX];
+static volatile uint8_t frame_ready = 0;                  /* 中断置 1，主循环处理时清 0 */
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-void get_json_value(char *json, char *key, char *out);
-void remove_good_prefix(char *src);
-void process_usart1_data(void);
+static void ProcessFrame(void);
 /* USER CODE END PFP */
 
-/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-// 简单JSON解析：从json字符串中提取key对应的值
-void get_json_value(char *json, char *key, char *out)
-{
-    char *p = strstr(json, key);
-    if (p == NULL) {
-        out[0] = '\0';
-        return;
-    }
-    char *start = strchr(p, ':');
-    if (start == NULL) {
-        out[0] = '\0';
-        return;
-    }
-    start = strchr(start, '"');
-    if (start == NULL) {
-        out[0] = '\0';
-        return;
-    }
-    start++;
-    char *end = strchr(start, '"');
-    if (end == NULL) {
-        out[0] = '\0';
-        return;
-    }
-    strncpy(out, start, end - start);
-    out[end - start] = '\0';
-    out[29] = '\0'; // 截断保护
-}
-
 /**
- * 去掉货物名称前面的 "good"/"Good"/"GOOD" 前缀(不区分大小写)
- * 例如: "GoodA,GoodB" -> "A,B"
- * 注意: 不使用 strtok,避免破坏原字符串
- */
-void remove_good_prefix(char *src)
+  * @brief  处理一帧分拣指令：解析四个方向 -> 去 Good 前缀 -> 刷新 OLED
+  * @note   frame_buffer 由接收中断写入，这里先在关中断状态下整体拷贝再解析。
+  */
+static void ProcessFrame(void)
 {
-    char temp_buf[30] = {0};
-    char result[30] = {0};
-    strcpy(temp_buf, src);
+    char     local_buf[RX_BUFFER_MAX];
+    char     down[30]  = {0};
+    char     up[30]    = {0};
+    char     left[30]  = {0};
+    char     right[30] = {0};
+    uint32_t primask;
 
-    char *token_start = temp_buf;
-    int first = 1;
-
-    while (*token_start != '\0')
-    {
-        // 跳过前导空格
-        while (*token_start == ' ') token_start++;
-        if (*token_start == '\0') break;
-
-        // 找到当前 token 的结尾(逗号或字符串结束)
-        char *token_end = strchr(token_start, ',');
-        char saved_char = 0;
-        if (token_end != NULL)
-        {
-            saved_char = *token_end;
-            *token_end = '\0';  // 临时截断当前token
-        }
-
-        // 非首个token加逗号分隔
-        if (!first)
-            strcat(result, ",");
-
-        // 转小写后比较
-        char low_buf[20] = {0};
-        strcpy(low_buf, token_start);
-        for (int i = 0; low_buf[i] != '\0'; i++)
-            low_buf[i] = tolower(low_buf[i]);
-
-        // 匹配 "good" 前缀,去掉前4个字符
-        if (strncmp(low_buf, "good", 4) == 0)
-            strcat(result, token_start + 4);
-        else
-            strcat(result, token_start);
-
-        // 恢复逗号,继续下一个token
-        if (token_end != NULL)
-        {
-            *token_end = saved_char;
-            token_start = token_end + 1;
-        }
-        else
-        {
-            break;  // 最后一个token
-        }
-        first = 0;
-    }
-
-    strcpy(src, result);
-}
-
-// 处理接收到的完整JSON帧(从双缓冲frame_buffer读取)
-void process_usart1_data(void)
-{
-    char local_buf[RX_BUFFER_MAX];
-    char down[30] = {0};
-    char up[30] = {0};
-    char left[30] = {0};
-    char right[30] = {0};
-
-    // 原子拷贝: 禁用IRQ防止ISR同时写frame_buffer导致数据损坏
+    /* ---- 临界区：原子取走一帧 ---- */
+    primask = __get_PRIMASK();
     __disable_irq();
-    strncpy(local_buf, frame_buffer, RX_BUFFER_MAX - 1);
-    local_buf[RX_BUFFER_MAX - 1] = '\0';
-    __enable_irq();
+    memcpy(local_buf, frame_buffer, sizeof(frame_buffer));
+    local_buf[sizeof(local_buf) - 1] = '\0';
+    __set_PRIMASK(primask);
+    /* ---- 临界区结束 ---- */
 
-    get_json_value(local_buf, "Down", down);
-    get_json_value(local_buf, "Up", up);
-    get_json_value(local_buf, "Left", left);
-    get_json_value(local_buf, "Right", right);
+    Json_GetValue(local_buf, "Down",  down,  sizeof(down));
+    Json_GetValue(local_buf, "Up",    up,    sizeof(up));
+    Json_GetValue(local_buf, "Left",  left,  sizeof(left));
+    Json_GetValue(local_buf, "Right", right, sizeof(right));
 
-    // 去掉 good 前缀(如果存在的话)
-    remove_good_prefix(down);
-    remove_good_prefix(up);
-    remove_good_prefix(left);
-    remove_good_prefix(right);
+    /* 去掉货物名前的 "Good" 前缀，例如 "GoodA,GoodB" -> "A,B" */
+    Json_StripGoodPrefix(down,  sizeof(down));
+    Json_StripGoodPrefix(up,    sizeof(up));
+    Json_StripGoodPrefix(left,  sizeof(left));
+    Json_StripGoodPrefix(right, sizeof(right));
 
-    // 更新OLED显示
+    /* 四行显示：方向用 16x16 汉字，货物名用 8x16 字符 */
     OLED_Clear();
-    OLED_ShowChinese(0, 0, 0);  // 上
+    OLED_ShowChinese(0, 0, 0);      /* 上 */
     OLED_ShowString(20, 0, up);
-    OLED_ShowChinese(0, 2, 1);  // 下
+    OLED_ShowChinese(0, 2, 1);      /* 下 */
     OLED_ShowString(20, 2, down);
-    OLED_ShowChinese(0, 4, 2);  // 左
+    OLED_ShowChinese(0, 4, 2);      /* 左 */
     OLED_ShowString(20, 4, left);
-    OLED_ShowChinese(0, 6, 3);  // 右
+    OLED_ShowChinese(0, 6, 3);      /* 右 */
     OLED_ShowString(20, 6, right);
 }
 
-// UART接收完成回调
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    // USART1: 收到 '}' 表示一帧结束
-    if (huart->Instance == USART1)
-    {
-        uint8_t ch = uart_rx_buf[rx_index];
-        if (ch == '}')
-        {
-            // 帧尾: 确保frame_buffer里有完整JSON
-            // 在 '}' 后面补 '\0',继续接收 \r\n 但不影响解析
-            rx_index++;
-            if (rx_index >= RX_BUFFER_MAX - 1)
-            {
-                memset(uart_rx_buf, 0, RX_BUFFER_MAX);
-                rx_index = 0;
-                frame_finish_flag = 0;
-            }
-            // 等待 \n 确认帧结束(下一个字节)
-            HAL_UART_Receive_IT(&huart1, &uart_rx_buf[rx_index], 1);
-        }
-        else if (ch == '\n')
-        {
-            // \n: 帧真正结束,截断JSON(去掉 \r\n)
-            uart_rx_buf[rx_index - 2] = '\0';  // 在 } 后面截断
-
-            // 拷贝到双缓冲,主循环稍后读取
-            strncpy(frame_buffer, (const char *)uart_rx_buf, RX_BUFFER_MAX - 1);
-            frame_buffer[RX_BUFFER_MAX - 1] = '\0';
-
-            frame_finish_flag = 1;
-            rx_index = 0;
-
-            // 立即重新启用接收,不等待主循环 — OLED操作期间不会丢数据
-            HAL_UART_Receive_IT(&huart1, &uart_rx_buf[0], 1);
-        }
-        else
-        {
-            rx_index++;
-            if (rx_index >= RX_BUFFER_MAX - 1)
-            {
-                memset(uart_rx_buf, 0, RX_BUFFER_MAX);
-                rx_index = 0;
-                frame_finish_flag = 0;
-            }
-            HAL_UART_Receive_IT(&huart1, &uart_rx_buf[rx_index], 1);
-        }
-    }
-
-    // USART2: 用 '\r' 或 '\n' 判断帧结束
-    if (huart->Instance == USART2)
-    {
-        uint8_t ch = uart2_temp_ch;
-        if (ch == '\r' || ch == '\n')
-        {
-            if (uart2_rx_idx > 0)
-            {
-                uart2_rx_buf[uart2_rx_idx] = '\0';
-                uart2_frame_flag = 1;
-            }
-            uart2_rx_idx = 0;
-        }
-        else
-        {
-            if (uart2_rx_idx < USART2_RX_MAX - 1)
-            {
-                uart2_rx_buf[uart2_rx_idx++] = ch;
-            }
-            else
-            {
-                memset(uart2_rx_buf, 0, USART2_RX_MAX);
-                uart2_rx_idx = 0;
-            }
-        }
-        HAL_UART_Receive_IT(&huart2, &uart2_temp_ch, 1);
-    }
-}
 /* USER CODE END 0 */
 
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
+    /* MCU Configuration--------------------------------------------------------*/
     HAL_Init();
+
+    /* Configure the system clock */
     SystemClock_Config();
 
+    /* Initialize all configured peripherals */
     MX_GPIO_Init();
     MX_USART1_UART_Init();
     MX_USART2_UART_Init();
@@ -278,33 +137,38 @@ int main(void)
     OLED_Clear();
     OLED_ShowMiniStr(0, 2, "WAIT DATA");
 
-    char test_msg[] = "UART READY\r\n";
-    HAL_UART_Transmit(&huart2, (uint8_t *)test_msg, strlen(test_msg), 50);
+    /* 调试口打招呼。长度用 strlen 取，不手写数字 */
+    {
+        static const char msg_ready[] = "UART READY\r\n";
+        HAL_UART_Transmit(&huart2, (uint8_t *)msg_ready, (uint16_t)strlen(msg_ready), 50);
+    }
 
-    // 启动中断接收
-    HAL_UART_Receive_IT(&huart1, &uart_rx_buf[rx_index], 1);
-    HAL_UART_Receive_IT(&huart2, &uart2_temp_ch, 1);
+    /* 启动串口单字节中断接收 */
+    HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
     /* USER CODE END 2 */
 
     /* Infinite loop */
+    /* USER CODE BEGIN WHILE */
     while (1)
     {
-        // 检查 USART1 完整帧(frame_buffer中已有完整JSON)
-        if (frame_finish_flag == 1)
+        if (frame_ready)
         {
-            frame_finish_flag = 0;
-
-            // 处理帧数据:解析JSON+更新显示
-            // 注意: ISR在拷贝到frame_buffer后已立即重新启用接收,
-            //       所以OLED操作期间不会丢失新数据
-            process_usart1_data();
+            frame_ready = 0;    /* 先清标志：拷贝期间到达的新帧会在下一轮再处理 */
+            ProcessFrame();
         }
 
         HAL_Delay(50);
     }
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
     /* USER CODE END 3 */
 }
 
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -333,6 +197,54 @@ void SystemClock_Config(void)
         Error_Handler();
     }
 }
+
+/* USER CODE BEGIN 4 */
+
+/**
+  * @brief  串口1 接收完成回调（每收到一个字节触发一次）
+  * @note   帧完整性判定采用 '}' + '\n' 双标记：
+  *           - 逐字节攒进 uart_rx_buf，同时记录是否见过 '}'；
+  *           - 收到 '\n' 时，只有见过 '}' 才把整帧发布到 frame_buffer；
+  *           - '\r' 直接跳过，兼容 CRLF 与单独 LF 两种行尾；
+  *           - 缓冲写满仍未成帧则整帧丢弃，避免缓冲区溢出。
+  */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1)
+    {
+        if (rx_byte == '\n')
+        {
+            if (rx_idx > 0 && rx_saw_brace)
+            {
+                uart_rx_buf[rx_idx] = '\0';
+                memcpy(frame_buffer, uart_rx_buf, rx_idx + 1);
+                frame_ready = 1;
+            }
+            rx_idx        = 0;
+            rx_saw_brace  = 0;
+        }
+        else if (rx_byte != '\r')
+        {
+            if (rx_idx < RX_BUFFER_MAX - 1)
+            {
+                uart_rx_buf[rx_idx++] = (char)rx_byte;
+                if (rx_byte == '}')
+                {
+                    rx_saw_brace = 1;
+                }
+            }
+            else
+            {
+                rx_idx       = 0;       /* 过长帧丢弃，重新开始攒 */
+                rx_saw_brace = 0;
+            }
+        }
+
+        HAL_UART_Receive_IT(&huart1, &rx_byte, 1);   /* 重新使能接收 */
+    }
+}
+
+/* USER CODE END 4 */
 
 void Error_Handler(void)
 {

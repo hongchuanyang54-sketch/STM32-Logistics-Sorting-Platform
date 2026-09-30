@@ -47,7 +47,6 @@ extern const unsigned char FontChinese[4][32];
 void OLED_Init(void);
 void OLED_Clear(void);
 void OLED_WriteCmd(uint8_t cmd);
-void OLED_WriteData(uint8_t dat);
 void OLED_SetPos(uint8_t x, uint8_t y);
 
 void OLED_ShowChar(uint8_t x,uint8_t y,uint8_t char_idx);

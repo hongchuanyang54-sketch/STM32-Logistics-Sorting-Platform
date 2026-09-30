@@ -339,7 +339,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F103xB</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F1xx/Include;../Drivers/CMSIS/Include;../OLED;../OLED_FONT;../SOFT_I2C;../UART_RECV;../JSON_PARSER;../SORT_LOGIC</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F1xx/Include;../Drivers/CMSIS/Include;../OLED;../SOFT_I2C;../JSON_PARSER</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -417,11 +417,6 @@
               <FileName>stm32f1xx_hal_msp.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f1xx_hal_msp.c</FilePath>
-            </File>
-            <File>
-              <FileName>sorter_control.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\SORT_LOGIC\sorter_control.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -517,16 +512,6 @@
               <FileName>soft_i2c.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\SOFT_I2C\soft_i2c.c</FilePath>
-            </File>
-          </Files>
-        </Group>
-        <Group>
-          <GroupName>UART_RECV</GroupName>
-          <Files>
-            <File>
-              <FileName>uart_recv.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\UART_RECV\uart_recv.c</FilePath>
             </File>
           </Files>
         </Group>
