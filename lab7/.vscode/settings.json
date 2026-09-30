@@ -1,0 +1,38 @@
+{
+  // 这个文件只在「单独打开 lab7 文件夹」时生效。
+  // 如果你习惯从仓库根目录打开，用的是根目录那份 .vscode/settings.json。
+  //
+  // 为什么需要它：VSCode 的 .vscode/settings.json 只在「被打开的文件夹」里生效，
+  // 打开 lab7/ 时根目录那份不会被读取，CMake Tools 就不知道该用 CMakePresets。
+
+  // 一律走 CMakePresets.json（CubeMX 生成，含 Debug / Release 两套）
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+
+  // IntelliSense 用 CMake Tools 生成的编译数据库，含全部 include 路径与宏定义。
+  // 注意：这样 FreeRTOS 的 osThreadNew / osDelay 这些符号才能正确跳转，
+  //       否则会满屏红线（因为头文件路径没配）。
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.cStandard": "c11",
+
+  // 源码统一 UTF-8
+  "files.encoding": "utf8",
+  "files.autoGuessEncoding": false,
+
+  "files.associations": { "*.h": "c" },
+  "editor.insertSpaces": true,
+  "editor.tabSize": 4,
+  "[c]": {
+    "editor.tabSize": 4
+  },
+  "stm32cube-ide-clangd.path": "cube",
+  "stm32cube-ide-clangd.arguments": [
+    "starm-clangd",
+    "--query-driver=C:\\Users\\huh\\AppData\\Local\\stm32cube\\bundles\\gnu-tools-for-stm32\\14.3.1+st.2\\bin\\arm-none-eabi-gcc*",
+    "--query-driver=C:\\Users\\huh\\AppData\\Local\\stm32cube\\bundles\\gnu-tools-for-stm32\\14.3.1+st.2\\bin\\arm-none-eabi-g++*"
+  ],
+  "cmake.cmakePath": "cube-cmake",
+  "cmake.configureArgs": [
+    "-DCMAKE_COMMAND=cube-cmake"
+  ]
+}

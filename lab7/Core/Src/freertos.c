@@ -25,7 +25,18 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+/* 诊断用，定义在 main.c；定位完会删 */
+extern void Dbg_Puts(const char *s);
 #include "usart.h"
+#include "display.h"
+#include "key.h"
+#include "uart_send.h"
+
+/* 计数器由 main.c 持有，键任务和串口任务都要用它 */
+extern uint8_t Counter_Get(void);
+extern void    Counter_Set(int value);
+
+#include "uart_send.h"
 
 /* USER CODE END Includes */
 
@@ -96,25 +107,16 @@ void vApplicationMallocFailedHook(void);
 /* USER CODE BEGIN 4 */
 void vApplicationStackOverflowHook(TaskHandle_t xTask, signed char *pcTaskName)
 {
-   /* Run time stack overflow checking is performed if
-   configCHECK_FOR_STACK_OVERFLOW is defined to 1 or 2. This hook function is
-   called if a stack overflow is detected. */
+   Dbg_Puts("!! STACK OVERFLOW !!\r\n");
+   for(;;) { }
 }
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN 5 */
 void vApplicationMallocFailedHook(void)
 {
-   /* vApplicationMallocFailedHook() will only be called if
-   configUSE_MALLOC_FAILED_HOOK is set to 1 in FreeRTOSConfig.h. It is a hook
-   function that will get called if a call to pvPortMalloc() fails.
-   pvPortMalloc() is called internally by the kernel whenever a task, queue,
-   timer or semaphore is created. It is also called by various parts of the
-   demo application. If heap_1.c or heap_2.c are used, then the size of the
-   heap available to pvPortMalloc() is defined by configTOTAL_HEAP_SIZE in
-   FreeRTOSConfig.h, and the xPortGetFreeHeapSize() API function can be used
-   to query the size of free heap space that remains (although it does not
-   provide information on how the remaining heap might be fragmented). */
+   Dbg_Puts("!! MALLOC FAILED !!\r\n");
+   for(;;) { }
 }
 /* USER CODE END 5 */
 
@@ -158,6 +160,13 @@ void MX_FREERTOS_Init(void) {
   TaskUartTxHandle = osThreadNew(StartTaskUartTx, NULL, &TaskUartTx_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
+  Dbg_Puts("[dbg] handles:\r\n");
+  Dbg_Puts(TaskDisplayHandle ? "D" : "!");
+  Dbg_Puts(TaskKeyHandle     ? "K" : "!");
+  Dbg_Puts(TaskUartRxHandle  ? "R" : "!");
+  Dbg_Puts(TaskUartTxHandle  ? "T" : "!");
+  Dbg_Puts("  ( != 创建失败 )\r\n");
+
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 
@@ -177,12 +186,14 @@ void MX_FREERTOS_Init(void) {
 void StartTaskDisplay(void *argument)
 {
   /* USER CODE BEGIN StartTaskDisplay */
-  /* 本阶段先空转，等心跳验证通过后再填业务逻辑 */
+  /* Display_ShowNum 一次调用扫描一轮（十位 1ms + 个位 1ms）。
+     本任务优先级最高，保证扫描节拍不被别人拖慢 —— 刷新低于 ~50Hz 肉眼就见闪。
+     函数内部用 osDelay 让出 CPU，所以不会饿死下面的任务。 */
   for(;;)
   {
-    osDelay(1000);
+    Display_ShowNum(Counter_Get());
   }
-  /* USER CODE END StartTaskDisplay */
+    /* USER CODE END StartTaskDisplay */
 }
 
 /* USER CODE BEGIN Header_StartTaskKey */
@@ -195,12 +206,33 @@ void StartTaskDisplay(void *argument)
 void StartTaskKey(void *argument)
 {
   /* USER CODE BEGIN StartTaskKey */
-  /* 本阶段先空转，等心跳验证通过后再填业务逻辑 */
   for(;;)
   {
-    osDelay(1000);
+    /* 只有计数值确实改变时才上报，
+       否则到 99 后长按会向串口刷屏、上位机镜像计数也会跑偏 */
+    switch (Key_Process())
+    {
+      case KEY_EVENT_ADD:
+        if (Counter_Get() < 99) { Counter_Set(Counter_Get() + 1); Uart_EventPush(UART_EVT_ADD); }
+        break;
+
+      case KEY_EVENT_SUB:
+        if (Counter_Get() > 0)  { Counter_Set(Counter_Get() - 1); Uart_EventPush(UART_EVT_SUB); }
+        break;
+
+      case KEY_EVENT_CLEAR:
+        Counter_Set(0);
+        Uart_EventPush(UART_EVT_ZERO);
+        break;
+
+      default:
+        break;
+    }
+
+    /* 10ms 轮询一次足够：人的按键反应在 100ms 以上 */
+    osDelay(10);
   }
-  /* USER CODE END StartTaskKey */
+    /* USER CODE END StartTaskKey */
 }
 
 /* USER CODE BEGIN Header_StartTaskUartRx */
@@ -238,6 +270,7 @@ void StartTaskUartTx(void *argument)
     /* 心跳：调度器活着的最直接证据 —— 串口每 500ms 打一个 tick。
        正确写法是 osDelay(500)，单位是 tick；本工程 TICK_RATE_HZ=1000，
        所以 500 tick 正好 = 500ms。 */
+    Dbg_Puts("tick (direct reg)\r\n");
     HAL_UART_Transmit(&huart1, (uint8_t *)msg, sizeof(msg) - 1, 100);
     osDelay(500);
   }

@@ -1,4 +1,5 @@
 #include "display.h"
+#include "cmsis_os2.h"
 
 /* ================= 引脚定义 ================= */
 #define SEG_PORT    GPIOB
@@ -10,7 +11,7 @@
 #define DIGIT2_PORT GPIOB            /* 个位 */
 #define DIGIT2_PIN  GPIO_PIN_9
 
-/* 每位点亮保持时间（ms） */
+/* 每位点亮保持时间（ms）。TICK_RATE_HZ=1000 时 1 tick = 1ms */
 #define DIGIT_ON_MS 1
 
 /* 共阳数码管段码表：数字 0~9，低电平点亮。0xC0 即 "0" */
@@ -67,12 +68,12 @@ void Display_ShowNum(uint8_t num)
     /* ---- 十位 ---- */
     SEG_Write(SEG_TABLE[ten]);
     HAL_GPIO_WritePin(DIGIT1_PORT, DIGIT1_PIN, GPIO_PIN_SET);
-    HAL_Delay(DIGIT_ON_MS);
+    osDelay(DIGIT_ON_MS);   /* 用 osDelay 而不是 HAL_Delay：HAL_Delay 是忙等，会饿死其它任务 */
     HAL_GPIO_WritePin(DIGIT1_PORT, DIGIT1_PIN, GPIO_PIN_RESET);
 
     /* ---- 个位 ---- */
     SEG_Write(SEG_TABLE[one]);
     HAL_GPIO_WritePin(DIGIT2_PORT, DIGIT2_PIN, GPIO_PIN_SET);
-    HAL_Delay(DIGIT_ON_MS);
+    osDelay(DIGIT_ON_MS);   /* 用 osDelay 而不是 HAL_Delay：HAL_Delay 是忙等，会饿死其它任务 */
     HAL_GPIO_WritePin(DIGIT2_PORT, DIGIT2_PIN, GPIO_PIN_RESET);
 }

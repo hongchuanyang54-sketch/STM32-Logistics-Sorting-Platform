@@ -150,11 +150,15 @@ standard names. */
 #define USE_CUSTOM_SYSTICK_HANDLER_IMPLEMENTATION 1
 
 /* USER CODE BEGIN Defines */
-/* [临时] CMSIS_V2 强制要求这两项为 1，CubeMX 默认没生成。
-   定位出全部缺失项后会改到 CubeMX 里设置，届时删除本段。 */
+/* CMSIS_V2 强制要求这两项为 1，而 CubeMX 默认不生成它们。
+   更规范的做法是在 CubeMX 里设 USE_TRACE_FACILITY = Enabled；
+   放在这里的好处是重新生成代码不会被冲掉。 */
 #define configUSE_TRACE_FACILITY         1
 #define INCLUDE_xSemaphoreGetMutexHolder 1
-/* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
+/* [诊断] 让断言失败时能看见是哪一条表达式挂了；定位完会删 */
+extern void Dbg_Puts(const char *s);
+#undef  configASSERT
+#define configASSERT(x)  do { if ((x) == 0) { Dbg_Puts("!! ASSERT(skip): " #x "\r\n"); } } while (0)
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

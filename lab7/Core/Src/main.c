@@ -66,7 +66,8 @@ volatile uint8_t rflag1 = 0; /* 收到完整一行的标志：中断置 1、主�
 void SystemClock_Config(void);
 void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
-static void Counter_Set(int value);
+void Counter_Set(int value);
+uint8_t Counter_Get(void);
 static void process_usart1_data(void);
 /* USER CODE END PFP */
 
@@ -80,12 +81,20 @@ static void process_usart1_data(void);
  *         注意入参是 int：atoi() 返回的可能超过 99，
  *         若先转成 uint8_t 再判断会发生回绕（例如 300 -> 44）。
  */
-static void Counter_Set(int value) {
+void Counter_Set(int value) {
   if (value < 0)
     value = 0;
   if (value > 99)
     value = 99;
   GoodsNumber = (uint8_t)value;
+}
+
+/**
+ * @brief  读取当前计数值
+ * @note   单字节读写在 Cortex-M3 上是原子的，显示任务直接读不会读到半个值
+ */
+uint8_t Counter_Get(void) {
+  return GoodsNumber;
 }
 
 /**
@@ -142,6 +151,30 @@ static void process_usart1_data(void) {
   }
 }
 
+
+/* ============ [临时诊断] 定位调度器启动失败用，定位完删除 ============ */
+
+/** 直接写 USART1 寄存器输出，绕过 HAL/中断 —— 用来区分"硬件问题"和"软件问题" */
+void Dbg_Puts(const char *s)
+{
+    while (*s)
+    {
+        while (!(USART1->SR & USART_SR_TXE)) { }
+        USART1->DR = (uint16_t)(uint8_t)(*s++);
+    }
+}
+
+/** 硬件异常打点：用尽量少的栈，避免 Handler 里再出问题 */
+void Dbg_Fault(const char *tag)
+{
+    while (*tag)
+    {
+        while (!(USART1->SR & USART_SR_TXE)) { }
+        USART1->DR = (uint16_t)(uint8_t)(*tag++);
+    }
+    while (1) { }
+}
+/* ==================================================================== */
 /* USER CODE END 0 */
 
 /**
@@ -175,13 +208,35 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  Dbg_Puts("[dbg] A enter USER CODE 2\r\n");
+
   Display_Init();
+  Dbg_Puts("[dbg] B display init ok\r\n");
 
   /* 启动串口单字节中断接收 */
   HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+  Dbg_Puts("[dbg] C uart rx IT on\r\n");
 
   /* 上电立即显示当前计数值 */
   Display_ShowNum(GoodsNumber);
+
+  /* [诊断] 复现 FreeRTOS xPortStartScheduler 里的 NVIC 优先级位探测：
+     往 IPR 写 0xFF 再读回，看哪些位"粘住"。真机 STM32F1 应返回 0xF0。 */
+  {
+    volatile uint8_t *ipr = (volatile uint8_t *)(0xE000E400UL + 16UL);
+    uint8_t orig = *ipr;
+    uint8_t rb;
+    static const char hexd[] = "0123456789ABCDEF";
+    char h[3];
+    *ipr = 0xFFU;
+    rb = *ipr;
+    *ipr = orig;
+    h[0] = hexd[(rb >> 4) & 0x0F]; h[1] = hexd[rb & 0x0F]; h[2] = 0;
+    Dbg_Puts("[dbg] NVIC IPR readback = 0x\r\n");
+    Dbg_Puts(h);
+    Dbg_Puts("  (real HW = F0)\r\n");
+  }
+  Dbg_Puts("[dbg] D about to start kernel\r\n");
   /* USER CODE END 2 */
 
   /* Init scheduler */

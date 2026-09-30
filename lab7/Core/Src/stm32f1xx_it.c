@@ -24,6 +24,8 @@
 #include "task.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+/* [临时诊断] 定位完删除 */
+extern void Dbg_Fault(const char *tag);
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -86,6 +88,7 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
+  Dbg_Fault("!! HARDFAULT !!\r\n");
 
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
@@ -116,6 +119,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
+  Dbg_Fault("!! BUSFAULT !!\r\n");
 
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
@@ -131,6 +135,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
+  Dbg_Fault("!! USAGEFAULT !!\r\n");
 
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
