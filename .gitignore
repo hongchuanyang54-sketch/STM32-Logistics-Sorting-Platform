@@ -52,3 +52,6 @@ Desktop.ini
 *.swp
 *.swo
 *~
+
+# ===== 本地构建校验日志（build_all.sh 生成）=====
+build_verify.log

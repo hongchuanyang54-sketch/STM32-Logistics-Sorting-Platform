@@ -339,7 +339,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F103xB</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F1xx/Include;../Drivers/CMSIS/Include;../KEY;../DISPALY;../UART_SEND;../FLASH_SAVE</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F1xx/Include;../Drivers/CMSIS/Include;../KEY;../DISPLAY;../UART_SEND</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -506,12 +506,12 @@
           </Files>
         </Group>
         <Group>
-          <GroupName>DIPPALY</GroupName>
+          <GroupName>DISPLAY</GroupName>
           <Files>
             <File>
               <FileName>display.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\DISPALY\display.c</FilePath>
+              <FilePath>..\DISPLAY\display.c</FilePath>
             </File>
           </Files>
         </Group>

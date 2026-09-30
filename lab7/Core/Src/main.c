@@ -1,15 +1,30 @@
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
-  * @brief ???? ???? ???? ????JSON:{GoodsNumber}:x
-  ******************************************************************************/
+  * @file    main.c
+  * @brief   光电计数器（lab7）
+  *
+  * 功能：
+  *   1. 2 位共阳数码管显示计数值（0~99）
+  *   2. KEY1/KEY2/KEY3（PA1/PA2/PA3）加 / 减 / 清零，支持长按连加连减
+  *   3. 串口 USART1 接收 {"GoodsNumber":"x"}\r\n 远程设定计数值
+  *   4. KEY4（PA0）急停、KEY_RE（PA6）复位，经串口上报 ESTOP / RESET
+  *
+  * 上报报文（均以 \r\n 结尾）：ADD / SUB / ZERO / ESTOP / RESET
+  * 下发报文：                  {"GoodsNumber":"x"}\r\n
+  *
+  * 模块划分：
+  *   KEY/key.c        按键消抖 + 长短按状态机
+  *   DISPLAY/display.c 数码管动态扫描
+  *   UART_SEND/uart_send.c 事件队列 + 串口上报
+  ******************************************************************************
+  */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usart.h"
 #include "gpio.h"
 
-/* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "key.h"
 #include "display.h"
@@ -19,78 +34,71 @@
 #include <stdlib.h>
 /* USER CODE END Includes */
 
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-/* USER CODE END PM */
-
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint8_t GoodsNumber = 0;
-volatile uint8_t uart_send_flag = 0;
-uint8_t rx_byte;
-char buffer1[32];
-uint8_t rx_idx = 0;
-uint8_t rflag1 = 0;
+uint8_t  GoodsNumber = 0;         /* 当前计数值 0~99 */
 
-uint8_t key_press_flag = 0;
-uint32_t key_press_tick = 0;
-uint32_t last_scan_tick = 0;
-#define KEY_SHORT_DELAY 200
-#define KEY_LONG_SPEED 200
-uint32_t key_long_tick;
-uint8_t key_single_flag = 0;
+uint8_t  rx_byte;                 /* 串口单字节接收缓冲（交给 HAL 使用） */
+char     buffer1[32];             /* 串口收到的原始行（接收中断写入） */
+uint8_t  rx_idx = 0;              /* buffer1 写入位置（仅接收中断访问） */
+volatile uint8_t rflag1 = 0;      /* 收到完整一行的标志：中断置 1、主循环清 0 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-void process_usart1_data(void);
-void Display_ShowNum(uint8_t num);
+static void Counter_Set(int value);
+static void process_usart1_data(void);
 /* USER CODE END PFP */
 
-/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
 /**
-  * @brief  ??????????,??????????
-  *         ????: {"GoodsNumber":"x"}\r\n (x???????)
-  * @retval None
+  * @brief  统一设置计数值
+  * @param  value 目标值，越界时钳位到 0~99
+  * @note   按键与串口下行都经过本函数，保证钳位规则只有一处。
+  *         注意入参是 int：atoi() 返回的可能超过 99，
+  *         若先转成 uint8_t 再判断会发生回绕（例如 300 -> 44）。
   */
-void process_usart1_data(void)
+static void Counter_Set(int value)
 {
-    /* ??????????,????? */
-    if(rflag1 == 0)
-        return;
+    if (value < 0)    value = 0;
+    if (value > 99)   value = 99;
+    GoodsNumber = (uint8_t)value;
+}
 
-    char num_str[10];
+/**
+  * @brief  解析串口下行指令 {"GoodsNumber":"x"}\r\n
+  * @note   buffer1/rflag1 由接收中断写入。这里先在关中断状态下把数据
+  *         整体拷到本地缓冲再解析，避免解析途中被新一帧数据改写。
+  */
+static void process_usart1_data(void)
+{
+    char     local_buf[sizeof(buffer1)];
+    char     num_str[10];
+    uint32_t primask;
 
-    /* ?sscanf???????,????????????? */
-    if(sscanf((char*)buffer1, "{\"GoodsNumber\":\"%[^\"]\"}", num_str) == 1)
-    {
-        /* ????????????,???????GoodsNumber */
-        GoodsNumber = (uint8_t)atoi(num_str);
+    if (rflag1 == 0) return;
 
-        /* ?????0~99 */
-        if(GoodsNumber > 99)
-            GoodsNumber = 99;
+    /* ---- 关中断，原子地取走一帧数据并复位接收状态 ---- */
+    primask = __get_PRIMASK();
+    __disable_irq();
 
-        /* ?????????? */
-        Display_ShowNum(GoodsNumber);
-    }
+    memcpy(local_buf, buffer1, sizeof(buffer1));
+    local_buf[sizeof(local_buf) - 1] = '\0';
 
-    /* ??????????,???????? */
     rflag1 = 0;
     rx_idx = 0;
     memset(buffer1, 0, sizeof(buffer1));
+
+    __set_PRIMASK(primask);
+    /* ---- 临界区结束 ---- */
+
+    if (sscanf(local_buf, "{\"GoodsNumber\":\"%[^\"]\"}", num_str) == 1)
+    {
+        Counter_Set(atoi(num_str));
+    }
 }
 
 /* USER CODE END 0 */
@@ -101,123 +109,76 @@ void process_usart1_data(void)
   */
 int main(void)
 {
-
-  /* USER CODE BEGIN 1 */
-  /* USER CODE END 1 */
-
   /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
-
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
+
   /* USER CODE BEGIN 2 */
-  Key_Init();
   Display_Init();
+
+  /* 启动串口单字节中断接收 */
   HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+
+  /* 上电立即显示当前计数值 */
+  Display_ShowNum(GoodsNumber);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    // ??????,??????
-    if(key_press_flag == 1 && HAL_GPIO_ReadPin(KEY_GPIO_PORT, KEY_ADD_PIN) == GPIO_PIN_RESET)
-    {
-        key_press_flag = 0;
-        key_single_flag = 0;
-    }
-    if(key_press_flag == 2 && HAL_GPIO_ReadPin(KEY_GPIO_PORT, KEY_SUB_PIN) == GPIO_PIN_RESET)
-    {
-        key_press_flag = 0;
-        key_single_flag = 0;
-    }
-    if(key_press_flag == 3 && HAL_GPIO_ReadPin(KEY_GPIO_PORT, KEY_RST_PIN) == GPIO_PIN_RESET)
-    {
-        key_press_flag = 0;
-        key_single_flag = 0;
-    }
-
+    /* ---- 1. 串口下行指令（放在按键之前，保持原有执行顺序） ---- */
     process_usart1_data();
 
-    if(key_press_flag != 0)
+    /* ---- 2. 按键：短按 / 长按连发 ----
+     * 只有计数值确实改变时才上报，两个原因：
+     *   a) 到 99（或减到 0）后继续长按，不会向串口持续刷屏；
+     *   b) 上报次数与设备实际计数一一对应，上位机的镜像计数不会跑偏。
+     */
+    switch (Key_Process())
     {
-        uint32_t now = HAL_GetTick();
-        // ??200ms????????
-        if(now - key_press_tick < KEY_SHORT_DELAY)
-        {
-            if(key_single_flag == 0)
+        case KEY_EVENT_ADD:
+            if (GoodsNumber < 99)
             {
-                switch(key_press_flag)
-                {
-                    case 1:
-                        if(GoodsNumber < 99)
-                        {
-                            GoodsNumber++;
-                            /* Send_Add() ????EXTI?????????,?????? */
-                        }
-                        break;
-                    case 2:
-                        if(GoodsNumber > 0)
-                        {
-                            GoodsNumber--;
-                            /* Send_Sub() ????EXTI?????????,?????? */
-                        }
-                        break;
-                    case 3:
-                        GoodsNumber = 0;
-                        /* Send_Zero() ????EXTI?????????,?????? */
-                        key_press_flag = 0;
-                        key_single_flag = 0;
-                        break;
-                }
-                key_single_flag = 1;
-                key_long_tick = now;
+                Counter_Set(GoodsNumber + 1);
+                Uart_EventPush(UART_EVT_ADD);
             }
-        }
-        // ??????
-        else if(now - key_long_tick >= KEY_LONG_SPEED)
-        {
-            switch(key_press_flag)
+            break;
+
+        case KEY_EVENT_SUB:
+            if (GoodsNumber > 0)
             {
-                case 1:
-                    if(GoodsNumber < 99)
-                    {
-                        GoodsNumber++;
-                        Send_Add();
-                    }
-                    break;
-                case 2:
-                    if(GoodsNumber > 0)
-                    {
-                        GoodsNumber--;
-                        Send_Sub();
-                    }
-                    break;
-                default: break;
+                Counter_Set(GoodsNumber - 1);
+                Uart_EventPush(UART_EVT_SUB);
             }
-            key_long_tick = now;
-        }
+            break;
+
+        case KEY_EVENT_CLEAR:
+            /* 清零是幂等的（上位机置 0 不会产生偏差），直接上报 */
+            Counter_Set(0);
+            Uart_EventPush(UART_EVT_ZERO);
+            break;
+
+        default:
+            break;
     }
 
-    Display_ShowNum(GoodsNumber);
-  }
-    /* USER CODE END WHILE */
+    /* ---- 3. 串口事件上报（中断只入队，这里才真正发送） ---- */
+    Uart_EventProcess();
 
-    /* USER CODE BEGIN 3 */
+    /* ---- 4. 数码管动态扫描：必须每轮调用，否则只有一位亮 ---- */
+    Display_ShowNum(GoodsNumber);
+
+  }
+  /* USER CODE END WHILE */
+
+  /* USER CODE BEGIN 3 */
   /* USER CODE END 3 */
 }
 
@@ -261,76 +222,28 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-// ????????
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-    static uint32_t last_tick[3] = {0,0,0};
-    uint32_t current_time = HAL_GetTick();
-    uint8_t idx = 255;
 
-    /* KEY4 (PA0) ????: ??????????,?????? */
-    if(GPIO_Pin == KEY4_Pin)
-    {
-        static uint32_t last_estop_tick = 0;
-        if(current_time - last_estop_tick < KEY_SHORT_DELAY)
-            return;
-        last_estop_tick = current_time;
-        Send_EStop();
-        return;
-    }
-
-    /* KEY_RE (PA6) ????: ??????????,?????? */
-    if(GPIO_Pin == KEY_RE_Pin)
-    {
-        static uint32_t last_reset_tick = 0;
-        if(current_time - last_reset_tick < KEY_SHORT_DELAY)
-            return;
-        last_reset_tick = current_time;
-        Send_Reset();
-        return;
-    }
-
-    /* ?????? */
-    if(GPIO_Pin == KEY1_Pin)      idx = 0;
-    else if(GPIO_Pin == KEY2_Pin) idx = 1;
-    else if(GPIO_Pin == KEY3_Pin) idx = 2;
-    if(idx == 255) return;
-
-    /* ???? (??200ms) */
-    if(current_time - last_tick[idx] < KEY_SHORT_DELAY)
-        return;
-    last_tick[idx] = current_time;
-
-    /* ????????? */
-    key_press_flag = idx + 1;
-    key_press_tick = current_time;
-
-    /* ?????????????????? */
-    switch(idx)
-    {
-        case 0:  Send_Add();   break;  /* KEY1: ?? --> ?? "ADD\r\n"   */
-        case 1:  Send_Sub();   break;  /* KEY2: ?? --> ?? "SUB\r\n"   */
-        case 2:  Send_Zero();  break;  /* KEY3: ?? --> ?? "ZERO\r\n"  */
-        default: break;
-    }
-}
-
-// ??????(?????,?????)
+/**
+  * @brief  串口1 接收完成回调（每收到一个字节触发一次）
+  * @note   逐字节累积到 buffer1，遇到 \r 或 \n 认为一帧结束，置位 rflag1。
+  *         本函数不做解析，解析放在主循环的 process_usart1_data() 中。
+  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if(huart->Instance == USART1)
+    if (huart->Instance == USART1)
     {
-        if(rx_idx < sizeof(buffer1)-1)
+        if (rx_idx < sizeof(buffer1) - 1)
         {
-            buffer1[rx_idx++] = rx_byte;
-            buffer1[rx_idx] = '\0';
+            buffer1[rx_idx++] = (char)rx_byte;
+            buffer1[rx_idx]   = '\0';       /* 保证始终是合法字符串 */
         }
-        // ??\r?\n??????
-        if(rx_byte == '\r' || rx_byte == '\n')
+
+        if (rx_byte == '\r' || rx_byte == '\n')
         {
             rflag1 = 1;
         }
-        HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+
+        HAL_UART_Receive_IT(&huart1, &rx_byte, 1);   /* 重新使能接收 */
     }
 }
 /* USER CODE END 4 */
@@ -342,26 +255,21 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
   */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
