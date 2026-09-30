@@ -1,0 +1,22 @@
+{
+  // ---- CMake ----
+  // 统一走 CMakePresets.json，不要在 UI 里另配一套参数
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+
+  // ---- IntelliSense ----
+  // 用 CMake Tools 生成的 compile_commands.json，包含全部 include 路径与宏定义
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.cStandard": "c11",
+
+  // ---- 文件编码 ----
+  // 源码统一 UTF-8。这点很重要：原始的 lab7 中文注释被存成过 '?'，别再重演
+  "files.encoding": "utf8",
+  "files.autoGuessEncoding": false,
+
+  // ---- 编辑器 ----
+  "files.associations": { "*.h": "c" },
+  "editor.insertSpaces": true,
+  "editor.tabSize": 4,
+  "[c]": { "editor.tabSize": 4 }
+}

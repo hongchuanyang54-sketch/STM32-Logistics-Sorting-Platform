@@ -47,7 +47,11 @@ Thumbs.db
 Desktop.ini
 
 # ===== IDE =====
-.vscode/
+# .vscode 只保留对本工程有用的配置；其余（用户界面状态等）一律忽略
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
 .idea/
 *.swp
 *.swo
@@ -55,3 +59,11 @@ Desktop.ini
 
 # ===== 本地构建校验日志（build_all.sh 生成）=====
 build_verify.log
+
+# ===== CMake / VSCode 构建产物 =====
+build/
+compile_commands.json
+*.elf
+*.bin
+*.map
+.cache/
