@@ -1,5 +1,5 @@
 #ifndef __OLED_H
-#define __H
+#define __OLED_H
 #include "main.h"
 #include "soft_i2c.h"
 
