@@ -245,3 +245,4 @@ VP_SYS_VS_ND.Signal=SYS_VS_ND
 VP_SYS_VS_Systick.Mode=SysTick
 VP_SYS_VS_Systick.Signal=SYS_VS_Systick
 board=custom
+rtos.0.ip=FREERTOS

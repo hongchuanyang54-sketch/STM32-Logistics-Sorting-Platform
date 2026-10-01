@@ -57,9 +57,11 @@
 uint8_t GoodsNumber = 0; /* 当前计数值 0~99 */
 
 uint8_t rx_byte;             /* 串口单字节接收缓冲（交给 HAL 使用） */
-char buffer1[32];            /* 串口收到的原始行（接收中断写入） */
-uint8_t rx_idx = 0;          /* buffer1 写入位置（仅接收中断访问） */
-volatile uint8_t rflag1 = 0; /* 收到完整一行的标志：中断置 1、主循环清 0 */
+
+/* 下面两个内核对象由 CubeMX 在 freertos.c 里创建
+   （FREERTOS -> Tasks and Queues -> Queues / Mutexes） */
+extern osMessageQueueId_t uartRxQueueHandle;   /* 中断收字节 -> TaskUartRx */
+extern osMutexId_t        counterMutexHandle;  /* 保护 GoodsNumber 的写入 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -68,7 +70,7 @@ void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 void Counter_Set(int value);
 uint8_t Counter_Get(void);
-static void process_usart1_data(void);
+void Counter_ApplyCommand(const char *line);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -86,7 +88,14 @@ void Counter_Set(int value) {
     value = 0;
   if (value > 99)
     value = 99;
+
+  /* 写计数值要加锁：TaskKey（按键）和 TaskUartRx（串口下行）都会写它，
+     两个任务同时"读-改-写"会丢掉一次更新。
+     读（Counter_Get）不加锁 —— 单字节读写是原子的，而且显示任务是最高优先级，
+     不该为了读一个字节去抢锁、拖慢数码管扫描。 */
+  (void)osMutexAcquire(counterMutexHandle, osWaitForever);
   GoodsNumber = (uint8_t)value;
+  (void)osMutexRelease(counterMutexHandle);
 }
 
 /**
@@ -98,83 +107,20 @@ uint8_t Counter_Get(void) {
 }
 
 /**
- * @brief  解析串口下行指令 {"GoodsNumber":"x"}\r\n
- * @note   buffer1/rflag1 由接收中断写入。这里先在关中断状态下把数据
- *         整体拷到本地缓冲再解析，避免解析途中被新一帧数据改写。
+ * @brief  解析串口下行指令 {"GoodsNumber":"x"}
+ * @param  line 一行完整报文（以 '\0' 结尾），由 TaskUartRx 攒好后传入
+ * @note   与裸机版的区别：这里直接拿到一整行字符串，不需要再关中断拷贝缓冲区。
+ *         字节是通过队列逐个传过来的，攒帧缓冲是 TaskUartRx 的私有变量，
+ *         天然没有竞态 —— 原来那套"关中断 + memcpy 到 local_buf"可以整个删掉。
  */
-static void process_usart1_data(void) {
-  char local_buf[sizeof(
-      buffer1)]; // 作用是创建一个本地缓冲区 local_buf，其大小与 buffer1
-                 // 相同，用于在关中断状态下临时存储接收到的串口数据，避免在解析过程中被新的数据覆盖。
-  char num_str[10]; // 作用是创建一个字符数组 num_str，用于存储从 JSON
-                    // 字符串中提取的计数值字符串，大小为 10
-                    // 个字符，足够容纳计数值及其引号。
-  uint32_t
-      primask; // 作用是定义一个无符号 32 位整数变量
-               // primask，用于保存当前中断状态，以便在关中断后恢复原有中断状态。
+void Counter_ApplyCommand(const char *line) {
+  char num_str[10];
 
-  if (rflag1 == 0)
-    return; // 作用是检查 rflag1 标志位是否为 0，如果为
-            // 0，表示没有完整的数据帧可供处理，直接返回函数，不进行后续解析操作。
-
-  /* ---- 关中断，原子地取走一帧数据并复位接收状态 ---- */
-  primask = __get_PRIMASK(); // 作用是调用 __get_PRIMASK()
-                             // 函数获取当前中断状态，并将其保存到 primask
-                             // 变量中，以便在处理完数据后恢复原有中断状态。
-  __disable_irq(); // 作用是调用 __disable_irq()
-                   // 函数禁用全局中断，确保在接下来的操作中不会被中断打断，从而保证数据的一致性和完整性。
-
-  memcpy(local_buf, buffer1,
-         sizeof(buffer1)); // 作用是将接收到的串口数据从全局缓冲区 buffer1
-                           // 复制到本地缓冲区 local_buf
-                           // 中，确保在解析过程中不会被新的数据覆盖。
-  local_buf[sizeof(local_buf) - 1] =
-      '\0'; // 作用是确保 local_buf 字符串以空字符 '\0'
-            // 结尾，防止在后续字符串操作中出现越界访问或未定义行为。
-
-  rflag1 = 0; // 作用是将 rflag1 标志位复位为
-              // 0，表示已经处理完当前数据帧，可以接收新的数据帧。
-  rx_idx = 0; // 作用是将接收索引 rx_idx 复位为 0，准备接收新的数据帧。
-  memset(buffer1, 0,
-         sizeof(buffer1)); // 作用是将全局缓冲区 buffer1
-                           // 清零，确保在接收新的数据帧时不会受到旧数据的干扰。
-
-  __set_PRIMASK(primask);
-  /* ---- 临界区结束 ---- */
-
-  if (sscanf(local_buf, "{\"GoodsNumber\":\"%[^\"]\"}", num_str) ==
-      1) // 作用是使用 sscanf 函数从 local_buf 中解析 JSON 字符串，提取
-         // "GoodsNumber" 对应的值，并将其存储在 num_str
-         // 中。如果解析成功（返回值为 1），则表示成功提取到计数值字符串。
-  {
+  if (sscanf(line, "{\"GoodsNumber\":\"%[^\"]\"}", num_str) == 1) {
     Counter_Set(atoi(num_str));
   }
 }
 
-
-/* ============ [临时诊断] 定位调度器启动失败用，定位完删除 ============ */
-
-/** 直接写 USART1 寄存器输出，绕过 HAL/中断 —— 用来区分"硬件问题"和"软件问题" */
-void Dbg_Puts(const char *s)
-{
-    while (*s)
-    {
-        while (!(USART1->SR & USART_SR_TXE)) { }
-        USART1->DR = (uint16_t)(uint8_t)(*s++);
-    }
-}
-
-/** 硬件异常打点：用尽量少的栈，避免 Handler 里再出问题 */
-void Dbg_Fault(const char *tag)
-{
-    while (*tag)
-    {
-        while (!(USART1->SR & USART_SR_TXE)) { }
-        USART1->DR = (uint16_t)(uint8_t)(*tag++);
-    }
-    while (1) { }
-}
-/* ==================================================================== */
 /* USER CODE END 0 */
 
 /**
@@ -208,35 +154,14 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  Dbg_Puts("[dbg] A enter USER CODE 2\r\n");
-
   Display_Init();
-  Dbg_Puts("[dbg] B display init ok\r\n");
 
-  /* 启动串口单字节中断接收 */
+  /* 启动串口单字节中断接收：每收到一个字节触发一次 USART1 中断。
+     中断里只把字节投进 uartRxQueue，攒帧与解析在 TaskUartRx 里做。 */
   HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
-  Dbg_Puts("[dbg] C uart rx IT on\r\n");
 
   /* 上电立即显示当前计数值 */
   Display_ShowNum(GoodsNumber);
-
-  /* [诊断] 复现 FreeRTOS xPortStartScheduler 里的 NVIC 优先级位探测：
-     往 IPR 写 0xFF 再读回，看哪些位"粘住"。真机 STM32F1 应返回 0xF0。 */
-  {
-    volatile uint8_t *ipr = (volatile uint8_t *)(0xE000E400UL + 16UL);
-    uint8_t orig = *ipr;
-    uint8_t rb;
-    static const char hexd[] = "0123456789ABCDEF";
-    char h[3];
-    *ipr = 0xFFU;
-    rb = *ipr;
-    *ipr = orig;
-    h[0] = hexd[(rb >> 4) & 0x0F]; h[1] = hexd[rb & 0x0F]; h[2] = 0;
-    Dbg_Puts("[dbg] NVIC IPR readback = 0x\r\n");
-    Dbg_Puts(h);
-    Dbg_Puts("  (real HW = F0)\r\n");
-  }
-  Dbg_Puts("[dbg] D about to start kernel\r\n");
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -250,47 +175,12 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  /* 控制权已经交给调度器：osKernelStart() 不会返回。
+     原先的裸机主循环（按键状态机 / 串口解析 / 上报 / 数码管扫描）
+     已经拆成 freertos.c 里的四个任务。 */
   while (1) {
-    /* ---- 1. 串口下行指令（放在按键之前，保持原有执行顺序） ---- */
-    process_usart1_data();
-
-    /* ---- 2. 按键：短按 / 长按连发 ----
-     * 只有计数值确实改变时才上报，两个原因：
-     *   a) 到 99（或减到 0）后继续长按，不会向串口持续刷屏；
-     *   b) 上报次数与设备实际计数一一对应，上位机的镜像计数不会跑偏。
-     */
-    switch (Key_Process()) {
-    case KEY_EVENT_ADD:
-      if (GoodsNumber < 99) {
-        Counter_Set(GoodsNumber + 1);
-        Uart_EventPush(UART_EVT_ADD);
-      }
-      break;
-
-    case KEY_EVENT_SUB:
-      if (GoodsNumber > 0) {
-        Counter_Set(GoodsNumber - 1);
-        Uart_EventPush(UART_EVT_SUB);
-      }
-      break;
-
-    case KEY_EVENT_CLEAR:
-      /* 清零是幂等的（上位机置 0 不会产生偏差），直接上报 */
-      Counter_Set(0);
-      Uart_EventPush(UART_EVT_ZERO);
-      break;
-
-    default:
-      break;
-    }
-
-    /* ---- 3. 串口事件上报（中断只入队，这里才真正发送） ---- */
-    Uart_EventProcess();
-
-    /* ---- 4. 数码管动态扫描：必须每轮调用，否则只有一位亮 ---- */
-    Display_ShowNum(GoodsNumber);
   }
-    /* USER CODE END WHILE */
+  /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
   /* USER CODE END 3 */
@@ -339,30 +229,18 @@ void SystemClock_Config(void)
 
 /**
  * @brief  串口1 接收完成回调（每收到一个字节触发一次）
- * @note   逐字节累积到 buffer1，遇到 \r 或 \n 认为一帧结束，置位 rflag1。
- *         本函数不做解析，解析放在主循环的 process_usart1_data() 中。
+ * @note   中断里只做一件事：把字节投进 uartRxQueue，立刻返回。
+ *         以前在这里逐字节攒帧、判 
+、置标志位，现在全交给 TaskUartRx。
+ *         中断变短了，也不用再操心主循环什么时候来取。
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-  if (huart->Instance == USART1) // 作用是判断当前中断回调是由哪个串口触发的，这里是判断是否为
-                                 // USART1 触发的接收完成中断。
-  {
-    if (rx_idx < sizeof(buffer1) - 1) // 作用：检查接收索引是否在缓冲区范围内
-    {
-      buffer1[rx_idx++] =
-          (char)rx_byte; // 作用：将接收到的字节存入缓冲区，并递增索引
-      buffer1[rx_idx] = '\0'; /* 保证始终是合法字符串 */
-    }
-
-    if (rx_byte == '\r' ||
-        rx_byte == '\n') // 作用是判断接收到的字节是否为回车或换行字符，如果是，则认为一帧数据接收完成，设置
-                         // rflag1 标志位为 1，表示有完整的数据帧可供处理。
-    {
-      rflag1 = 1;
-    }
-
+  if (huart->Instance == USART1) {
+    (void)osMessageQueuePut(uartRxQueueHandle, &rx_byte, 0U, 0U);
     HAL_UART_Receive_IT(&huart1, &rx_byte, 1); /* 重新使能接收 */
   }
 }
+
 /* USER CODE END 4 */
 
 /**

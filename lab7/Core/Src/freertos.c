@@ -26,17 +26,16 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* 诊断用，定义在 main.c；定位完会删 */
-extern void Dbg_Puts(const char *s);
 #include "usart.h"
 #include "display.h"
 #include "key.h"
 #include "uart_send.h"
+extern void Counter_ApplyCommand(const char *line);
 
 /* 计数器由 main.c 持有，键任务和串口任务都要用它 */
 extern uint8_t Counter_Get(void);
 extern void    Counter_Set(int value);
 
-#include "uart_send.h"
 
 /* USER CODE END Includes */
 
@@ -87,6 +86,21 @@ const osThreadAttr_t TaskUartTx_attributes = {
   .stack_size = 192 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
+/* Definitions for uartRxQueue */
+osMessageQueueId_t uartRxQueueHandle;
+const osMessageQueueAttr_t uartRxQueue_attributes = {
+  .name = "uartRxQueue"
+};
+/* Definitions for uartEvtQueue */
+osMessageQueueId_t uartEvtQueueHandle;
+const osMessageQueueAttr_t uartEvtQueue_attributes = {
+  .name = "uartEvtQueue"
+};
+/* Definitions for counterMutex */
+osMutexId_t counterMutexHandle;
+const osMutexAttr_t counterMutex_attributes = {
+  .name = "counterMutex"
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -107,16 +121,14 @@ void vApplicationMallocFailedHook(void);
 /* USER CODE BEGIN 4 */
 void vApplicationStackOverflowHook(TaskHandle_t xTask, signed char *pcTaskName)
 {
-   Dbg_Puts("!! STACK OVERFLOW !!\r\n");
-   for(;;) { }
+   Error_Handler();
 }
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN 5 */
 void vApplicationMallocFailedHook(void)
 {
-   Dbg_Puts("!! MALLOC FAILED !!\r\n");
-   for(;;) { }
+   Error_Handler();
 }
 /* USER CODE END 5 */
 
@@ -129,6 +141,9 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
+  /* Create the mutex(es) */
+  /* creation of counterMutex */
+  counterMutexHandle = osMutexNew(&counterMutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -141,6 +156,13 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_TIMERS */
   /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
+
+  /* Create the queue(s) */
+  /* creation of uartRxQueue */
+  uartRxQueueHandle = osMessageQueueNew (32, sizeof(uint8_t), &uartRxQueue_attributes);
+
+  /* creation of uartEvtQueue */
+  uartEvtQueueHandle = osMessageQueueNew (8, sizeof(UartEvent_t), &uartEvtQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -160,12 +182,6 @@ void MX_FREERTOS_Init(void) {
   TaskUartTxHandle = osThreadNew(StartTaskUartTx, NULL, &TaskUartTx_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  Dbg_Puts("[dbg] handles:\r\n");
-  Dbg_Puts(TaskDisplayHandle ? "D" : "!");
-  Dbg_Puts(TaskKeyHandle     ? "K" : "!");
-  Dbg_Puts(TaskUartRxHandle  ? "R" : "!");
-  Dbg_Puts(TaskUartTxHandle  ? "T" : "!");
-  Dbg_Puts("  ( != 创建失败 )\r\n");
 
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
@@ -193,7 +209,7 @@ void StartTaskDisplay(void *argument)
   {
     Display_ShowNum(Counter_Get());
   }
-    /* USER CODE END StartTaskDisplay */
+  /* USER CODE END StartTaskDisplay */
 }
 
 /* USER CODE BEGIN Header_StartTaskKey */
@@ -232,7 +248,7 @@ void StartTaskKey(void *argument)
     /* 10ms 轮询一次足够：人的按键反应在 100ms 以上 */
     osDelay(10);
   }
-    /* USER CODE END StartTaskKey */
+  /* USER CODE END StartTaskKey */
 }
 
 /* USER CODE BEGIN Header_StartTaskUartRx */
@@ -245,10 +261,39 @@ void StartTaskKey(void *argument)
 void StartTaskUartRx(void *argument)
 {
   /* USER CODE BEGIN StartTaskUartRx */
-  /* 本阶段先空转，等心跳验证通过后再填业务逻辑 */
+  /* 任务私有的攒帧缓冲。字节是队列一个个送过来的，
+     这里不需要双缓冲、不需要关中断 —— 队列已经保证了原子性。 */
+  static char    line[50];
+  static uint8_t idx = 0;
+  uint8_t b;
+
   for(;;)
   {
-    osDelay(1000);
+    /* 阻塞等一个字节。没有数据时本任务完全不被调度，不占 CPU ——
+       这是队列相比裸机版轮询标志位最本质的差别。 */
+    if (osMessageQueueGet(uartRxQueueHandle, &b, NULL, osWaitForever) != osOK)
+    {
+      continue;
+    }
+
+
+    if (b == '\r' || b == '\n')
+    {
+      if (idx > 0)                     /* 一行结束，交给解析 */
+      {
+        line[idx] = '\0';
+        Counter_ApplyCommand(line);
+        idx = 0;
+      }
+    }
+    else if (idx < sizeof(line) - 1)
+    {
+      line[idx++] = (char)b;
+    }
+    else
+    {
+      idx = 0;                         /* 过长的帧直接丢弃，从头再来 */
+    }
   }
   /* USER CODE END StartTaskUartRx */
 }
@@ -263,16 +308,16 @@ void StartTaskUartRx(void *argument)
 void StartTaskUartTx(void *argument)
 {
   /* USER CODE BEGIN StartTaskUartTx */
-  static const char msg[] = "tick\r\n";
+  UartEvent_t evt;
 
   for(;;)
   {
-    /* 心跳：调度器活着的最直接证据 —— 串口每 500ms 打一个 tick。
-       正确写法是 osDelay(500)，单位是 tick；本工程 TICK_RATE_HZ=1000，
-       所以 500 tick 正好 = 500ms。 */
-    Dbg_Puts("tick (direct reg)\r\n");
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg, sizeof(msg) - 1, 100);
-    osDelay(500);
+    /* 阻塞等一个待上报事件。相比裸机版每轮主循环都去查一次"有没有事件"，
+       这里任务是真的睡着了，由内核在入队那一刻唤醒。 */
+    if (osMessageQueueGet(uartEvtQueueHandle, &evt, NULL, osWaitForever) == osOK)
+    {
+      Uart_SendEvent(evt);
+    }
   }
   /* USER CODE END StartTaskUartTx */
 }

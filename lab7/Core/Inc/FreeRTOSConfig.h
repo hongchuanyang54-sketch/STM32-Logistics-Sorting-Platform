@@ -155,10 +155,15 @@ standard names. */
    放在这里的好处是重新生成代码不会被冲掉。 */
 #define configUSE_TRACE_FACILITY         1
 #define INCLUDE_xSemaphoreGetMutexHolder 1
-/* [诊断] 让断言失败时能看见是哪一条表达式挂了；定位完会删 */
-extern void Dbg_Puts(const char *s);
+/* Proteus 的 NVIC 仿真不完整：优先级寄存器 IPR 读回 0xFF，
+   而真机 STM32F1 只有 4 个优先级位、应该读回 0xF0。
+   于是 FreeRTOS 在 xPortStartScheduler() 里那条 PRIGROUP 断言必然失败，
+   调度器直接卡死。仿真期间只能把断言改成不致命。
+
+   真机上请改回致命版本，它能帮你抓住真实的中断优先级配置错误：
+     #define configASSERT(x)  if((x)==0){ taskDISABLE_INTERRUPTS(); for(;;); }   */
 #undef  configASSERT
-#define configASSERT(x)  do { if ((x) == 0) { Dbg_Puts("!! ASSERT(skip): " #x "\r\n"); } } while (0)
+#define configASSERT(x)  ((void)(x))
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */
