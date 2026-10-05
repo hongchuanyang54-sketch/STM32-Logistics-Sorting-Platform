@@ -18,5 +18,20 @@
   "files.associations": { "*.h": "c" },
   "editor.insertSpaces": true,
   "editor.tabSize": 4,
-  "[c]": { "editor.tabSize": 4 }
+  "[c]": {
+    "editor.tabSize": 4
+  },
+  "cmake.cmakePath": "cube-cmake",
+  "cmake.configureArgs": [
+    "-DCMAKE_COMMAND=cube-cmake"
+  ],
+  "cmake.preferredGenerators": [
+    "Ninja"
+  ],
+  "stm32cube-ide-clangd.path": "cube",
+  "stm32cube-ide-clangd.arguments": [
+    "starm-clangd",
+    "--query-driver=C:\\Users\\huh\\AppData\\Local\\stm32cube\\bundles\\gnu-tools-for-stm32\\14.3.1+st.2\\bin\\arm-none-eabi-gcc*",
+    "--query-driver=C:\\Users\\huh\\AppData\\Local\\stm32cube\\bundles\\gnu-tools-for-stm32\\14.3.1+st.2\\bin\\arm-none-eabi-g++*"
+  ]
 }

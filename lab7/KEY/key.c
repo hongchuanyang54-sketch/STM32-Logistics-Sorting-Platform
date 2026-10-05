@@ -24,34 +24,35 @@ static uint8_t  key_single_flag = 0;    /* 本次按下是否已执行过"短按
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     static uint32_t last_tick[3]    = {0, 0, 0};
-    static uint32_t last_estop_tick = 0;
-    static uint32_t last_reset_tick = 0;
+    static uint32_t last_estop_tick = 0;//这是一个静态变量，用于记录上次急停按键触发的时间戳，防止按键抖动导致的误触发
+    static uint32_t last_reset_tick = 0;//这是一个静态变量，用于记录上次复位按键触发的时间戳，防止按键抖动导致的误触发
 
-    uint32_t now = HAL_GetTick();
-    uint8_t  idx = 255;
+    uint32_t now = HAL_GetTick();//获取当前系统时间戳（毫秒）
+    uint8_t  idx = 255;//按键索引，初始值为 255因为 255 不对应任何按键，表示未检测到有效按键，用来区分 KEY1/KEY2/KEY3 的按键索引
 
     /* ---- KEY4 (PA0) 急停：独立处理，不参与计数 ---- */
     if (GPIO_Pin == KEY4_Pin)
     {
-        if (now - last_estop_tick < KEY_DEBOUNCE_MS) return;
+        if (now - last_estop_tick < KEY_DEBOUNCE_MS) return;//判断消抖
         last_estop_tick = now;
-        Uart_EventPush(UART_EVT_ESTOP);
+        Uart_EventPush(UART_EVT_ESTOP);//将急停事件推入串口事件队列，等待主循环处理
         return;
     }
 
     /* ---- KEY_RE (PA6) 急停复位：独立处理 ---- */
     if (GPIO_Pin == KEY_RE_Pin)
     {
-        if (now - last_reset_tick < KEY_DEBOUNCE_MS) return;
+        if (now - last_reset_tick < KEY_DEBOUNCE_MS) return;//判断消抖
         last_reset_tick = now;
-        Uart_EventPush(UART_EVT_RESET);
+        Uart_EventPush(UART_EVT_RESET);//将复位事件推入串口事件队列，等待主循环处理
         return;
     }
 
     /* ---- KEY1/KEY2/KEY3 计数按键 ---- */
-    if      (GPIO_Pin == KEY1_Pin) idx = 0;
-    else if (GPIO_Pin == KEY2_Pin) idx = 1;
-    else if (GPIO_Pin == KEY3_Pin) idx = 2;
+    if      (GPIO_Pin == KEY1_Pin) idx = 0;//按键索引 0 对应 KEY1
+    else if (GPIO_Pin == KEY2_Pin) idx = 1;//按键索引 1 对应 KEY2
+    else if (GPIO_Pin == KEY3_Pin) idx = 2;//按键索引 2 对应 KEY3
+    else return;
     if (idx == 255) return;
 
     /* 按键消抖 */
@@ -74,7 +75,7 @@ KeyEvent_t Key_Process(void)
     /* ---- 1. 松手检测：引脚回到低电平，结束本次按键 ---- */
     if ((key_press_flag == 1 && HAL_GPIO_ReadPin(KEY_GPIO_PORT, KEY_ADD_PIN) == GPIO_PIN_RESET) ||
         (key_press_flag == 2 && HAL_GPIO_ReadPin(KEY_GPIO_PORT, KEY_SUB_PIN) == GPIO_PIN_RESET) ||
-        (key_press_flag == 3 && HAL_GPIO_ReadPin(KEY_GPIO_PORT, KEY_RST_PIN) == GPIO_PIN_RESET))
+        (key_press_flag == 3 && HAL_GPIO_ReadPin(KEY_GPIO_PORT, KEY_RST_PIN) == GPIO_PIN_RESET))//判断按键是否松开
     {
         key_press_flag  = 0;
         key_single_flag = 0;

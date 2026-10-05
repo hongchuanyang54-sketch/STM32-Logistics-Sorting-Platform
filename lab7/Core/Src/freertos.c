@@ -219,7 +219,7 @@ void StartTaskDisplay(void *argument)
 * @retval None
 */
 /* USER CODE END Header_StartTaskKey */
-void StartTaskKey(void *argument)
+void StartTaskKey(void *argument)//作用是在一个无限循环中周期性地调用 Key_Process() 函数来处理按键事件，并根据按键事件更新计数值和发送串口事件。
 {
   /* USER CODE BEGIN StartTaskKey */
   for(;;)
@@ -263,9 +263,9 @@ void StartTaskUartRx(void *argument)
   /* USER CODE BEGIN StartTaskUartRx */
   /* 任务私有的攒帧缓冲。字节是队列一个个送过来的，
      这里不需要双缓冲、不需要关中断 —— 队列已经保证了原子性。 */
-  static char    line[50];
+  static char    line[50];//作用是存储从串口接收到的一行数据，直到遇到换行符为止。
   static uint8_t idx = 0;
-  uint8_t b;
+  uint8_t b;//作用是存储从串口接收到的单个字节数据，用于逐个处理和组装成完整的命令行。
 
   for(;;)
   {
@@ -273,20 +273,20 @@ void StartTaskUartRx(void *argument)
        这是队列相比裸机版轮询标志位最本质的差别。 */
     if (osMessageQueueGet(uartRxQueueHandle, &b, NULL, osWaitForever) != osOK)
     {
-      continue;
+      continue;//目的是跳过本次循环，继续等待下一个字节的接收，确保只有在成功获取到一个字节时才进行后续处理。
     }
 
 
-    if (b == '\r' || b == '\n')
+    if (b == '\r' || b == '\n')//如果接收到的字节是回车符或换行符，表示一行命令已经结束
     {
-      if (idx > 0)                     /* 一行结束，交给解析 */
+      if (idx > 0) //如果当前缓冲区中有数据（即 idx > 0），则将缓冲区中的数据作为一行完整的命令进行处理
       {
         line[idx] = '\0';
         Counter_ApplyCommand(line);
         idx = 0;
       }
     }
-    else if (idx < sizeof(line) - 1)
+    else if (idx < sizeof(line) - 1)//如果接收到的字节不是回车符或换行符，并且当前缓冲区还有空间（即 idx 小于缓冲区大小减一），则将接收到的字节存入缓冲区，并将索引 idx 增加 1，准备接收下一个字节。
     {
       line[idx++] = (char)b;
     }
@@ -305,7 +305,7 @@ void StartTaskUartRx(void *argument)
 * @retval None
 */
 /* USER CODE END Header_StartTaskUartTx */
-void StartTaskUartTx(void *argument)
+void StartTaskUartTx(void *argument)//作用是在一个无限循环中等待串口事件队列中的事件，并将这些事件发送到串口。
 {
   /* USER CODE BEGIN StartTaskUartTx */
   UartEvent_t evt;
@@ -314,7 +314,7 @@ void StartTaskUartTx(void *argument)
   {
     /* 阻塞等一个待上报事件。相比裸机版每轮主循环都去查一次"有没有事件"，
        这里任务是真的睡着了，由内核在入队那一刻唤醒。 */
-    if (osMessageQueueGet(uartEvtQueueHandle, &evt, NULL, osWaitForever) == osOK)
+    if (osMessageQueueGet(uartEvtQueueHandle, &evt, NULL, osWaitForever) == osOK)//判断是否成功从串口事件队列中获取到一个事件
     {
       Uart_SendEvent(evt);
     }

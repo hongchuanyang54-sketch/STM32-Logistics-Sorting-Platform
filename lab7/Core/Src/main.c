@@ -31,6 +31,7 @@
 #include "display.h"
 #include "key.h"
 #include "uart_send.h"
+#include "at24c02.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,7 +95,22 @@ void Counter_Set(int value) {
      读（Counter_Get）不加锁 —— 单字节读写是原子的，而且显示任务是最高优先级，
      不该为了读一个字节去抢锁、拖慢数码管扫描。 */
   (void)osMutexAcquire(counterMutexHandle, osWaitForever);
+
   GoodsNumber = (uint8_t)value;
+
+  /* 无条件写盘，不做"值没变就跳过"的优化。
+     因为一旦某次写失败（总线毛刺、器件还在忙），RAM 和 EEPROM 就分叉了；
+     若还按"值没变就不写"跳过，用户之后一直按清零也修不回来 ——
+     因为 RAM 已经是 0，判断相等直接跳过，下次开机旧值又冒出来。
+     无条件写让分叉在下次操作时自动愈合。代价是偶尔多一次 6ms 的写，
+     24C02 有 100 万次擦写寿命，人工改数的频率下可以忽略。
+
+     写盘要 ~6ms（含芯片 5ms 内部写周期），这段时间锁一直被持有，
+     另一个写者会阻塞这么久 —— 计数值是人工改的，这个代价可以接受。
+     必须留在锁内：否则两个任务可能交错写，EEPROM 里最终留下的是旧值。
+     显示任务不碰这把锁，所以数码管扫描完全不受影响。 */
+  (void)AT24C02_SaveCount(GoodsNumber);
+
   (void)osMutexRelease(counterMutexHandle);
 }
 
@@ -116,7 +132,10 @@ uint8_t Counter_Get(void) {
 void Counter_ApplyCommand(const char *line) {
   char num_str[10];
 
-  if (sscanf(line, "{\"GoodsNumber\":\"%[^\"]\"}", num_str) == 1) {
+  /* 宽度必须写成 %9[...]：num_str 只有 10 字节（含结尾的 '\0'），
+     不加宽度限制的话，上位机发个 {"GoodsNumber":"999999999999"} 就能
+     顺着栈写出 40 多字节，砸掉本函数的返回地址。 */
+  if (sscanf(line, "{\"GoodsNumber\":\"%9[^\"]\"}", num_str) == 1) {
     Counter_Set(atoi(num_str));
   }
 }
@@ -156,12 +175,28 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Display_Init();
 
+  /* 上电先把上次存盘的计数值读回来。
+     位置有讲究：必须在 MX_GPIO_Init() 之后（PA4/PA5 这时才配好开漏输出）。
+     读操作本身不带延时，所以可以在调度器启动前调用 ——
+     写操作里有 osDelay，那个只能在任务里调。 */
+  {
+    int saved = AT24C02_LoadCount();
+    /* 空片（没写过）读回来是 0xFF，读失败返回 -1，都当 0 处理。
+       这一步同时也是在自检：I²C 不通的话这里读回来就是 -1。 */
+    GoodsNumber = (saved >= 0 && saved <= 99) ? (uint8_t)saved : 0;
+  }
+
   /* 启动串口单字节中断接收：每收到一个字节触发一次 USART1 中断。
      中断里只把字节投进 uartRxQueue，攒帧与解析在 TaskUartRx 里做。 */
   HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
 
-  /* 上电立即显示当前计数值 */
-  Display_ShowNum(GoodsNumber);
+  /* 这里【不要】调 Display_ShowNum()：
+     它内部有 osDelay，而调度器还没启动，属于非法调用
+     （vTaskDelay 会去操作还不存在的 pxCurrentTCB / 延迟链表）。
+     当前之所以没出事，是因为 port.c 里 uxCriticalNesting 的复位值是
+     0xaaaaaaaa，vPortExitCritical 判定不为 0 就不解除中断屏蔽，
+     于是那个 PendSV 一直挂起到调度器启动后才被消化 —— 靠的是运气。
+     TaskDisplay 一启动就会显示同一个值，本来也不需要在这里先显示一次。 */
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -230,7 +265,7 @@ void SystemClock_Config(void)
 /**
  * @brief  串口1 接收完成回调（每收到一个字节触发一次）
  * @note   中断里只做一件事：把字节投进 uartRxQueue，立刻返回。
- *         以前在这里逐字节攒帧、判 
+ *         以前在这里逐字节攒帧、判 
 、置标志位，现在全交给 TaskUartRx。
  *         中断变短了，也不用再操心主循环什么时候来取。
  */

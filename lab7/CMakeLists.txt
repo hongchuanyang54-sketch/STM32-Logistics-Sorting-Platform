@@ -33,12 +33,16 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     KEY/key.c
     DISPLAY/display.c
     UART_SEND/uart_send.c
+    I2C/soft_i2c.c
+    EEPROM/at24c02.c
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     KEY
     DISPLAY
     UART_SEND
+    I2C
+    EEPROM
 )
 
 # ---- 产出 hex / bin，Proteus 直接加载 ----

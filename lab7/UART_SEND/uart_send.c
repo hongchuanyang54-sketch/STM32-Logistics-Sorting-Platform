@@ -14,7 +14,7 @@ static const char *const EVT_TEXT[] =
     "RESET\r\n"      /* UART_EVT_RESET */
 };
 
-void Uart_EventPush(UartEvent_t evt)
+void Uart_EventPush(UartEvent_t evt)//该函数的作用是将一个串口事件（如按键事件）投递到上报队列中，以便后续处理和发送到串口。
 {
     if (evt == UART_EVT_NONE) return;
 
