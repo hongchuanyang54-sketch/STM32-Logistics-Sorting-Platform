@@ -70,3 +70,7 @@ compile_commands.json
 
 # ===== Proteus 自动备份 =====
 Project Backups/
+
+# ===== 个人简历（含联系方式，不入公开仓库）=====
+cv-*.pdf
+cv-*.html
