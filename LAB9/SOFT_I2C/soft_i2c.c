@@ -10,16 +10,28 @@
 /* USER CODE END Header */
 #include "soft_i2c.h"
 
+/* 半周期忙等循环次数。
+   按 -O0 / 72MHz 反汇编数周期算：循环体约 10 个周期，
+   一次延时 ≈ 5×10 + 开销 ≈ 70 周期 ≈ 1µs；
+   一个 bit = 3×(延时 + HAL_GPIO_WritePin 约 45 周期) ≈ 345 周期 ≈ 4.8µs
+   → SCL 约 200kHz，压在 SSD1306 的 400kHz 上限之内。
+
+   ⚠ 循环变量必须是 volatile：
+   不加的话 -Os 会把这个空循环整个优化掉 —— 实测 Release 构建下
+   SoftI2C_Delay() 只剩一条 bx lr，延时归零，I²C 时序直接崩。 */
+#define SOFT_I2C_DELAY_LOOPS  5
+
 /**
   * @brief  位翻转的间隔延时
-  * @note   全靠这个空循环撑出时序。SSD1306 没有最小时钟频率要求，
-  *         慢一点不影响显示。软件 I²C 的固有弱点也在这里：
-  *         时序由 CPU 忙等保证，中间被长时间打断就会破坏总线。
+  * @note   软件 I²C 的固有弱点：时序靠 CPU 忙等保证。
+  *         在 RTOS 下被高优先级任务抢占是安全的 —— 被抢占的是主机，
+  *         只是 SDA/SCL 维持原电平更久、节拍变慢，从机一直等着。
+  *         （I²C 没有时钟低电平的最大时间限制，有总线超时要求的是 SMBus。）
   */
 void SoftI2C_Delay(void)
 {
-    uint32_t i;
-    for (i = 0; i < 5; i++) { }
+    volatile uint32_t i;
+    for (i = 0; i < SOFT_I2C_DELAY_LOOPS; i++) { }
 }
 
 /**

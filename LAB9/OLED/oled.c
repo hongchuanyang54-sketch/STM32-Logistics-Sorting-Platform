@@ -167,7 +167,7 @@ void OLED_ShowChar(uint8_t x,uint8_t y,uint8_t char_idx)
 }
 
 /* 显示字符串：只支持 CharIndex 里列出的字符，其余会被跳过 */
-void OLED_ShowMiniStr(uint8_t x,uint8_t y,char *str)
+void OLED_ShowMiniStr(uint8_t x,uint8_t y,char *str)//该函数用于在OLED上显示字符串，x和y分别表示起始位置的列和页，str是要显示的字符串
 {
     uint8_t x_off = x;
     while(*str != '\0')

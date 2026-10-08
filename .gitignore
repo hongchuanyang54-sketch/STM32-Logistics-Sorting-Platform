@@ -67,3 +67,6 @@ compile_commands.json
 *.bin
 *.map
 .cache/
+
+# ===== Proteus 自动备份 =====
+Project Backups/

@@ -42,12 +42,15 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(stm32_add_firmware)
 
-# lab7 / lab8 都已切换到 CubeMX 自己维护的 CMake 工程
+# lab7 / lab8 / LAB9 都已切换到 CubeMX 自己维护的 CMake 工程
 # （<lab>/CMakeLists.txt + <lab>/cmake/stm32cubemx/），因为它们在 CubeMX 里
 # 开启了 FreeRTOS，源文件清单由 CubeMX 自动更新，不再手工维护。
-# 这两个都是独立工程，用法：
+#
+# 三个都是独立工程，各自构建：
 #   cd lab7 && cmake --preset Debug && cmake --build --preset Debug
 #   cd lab8 && cmake --preset Debug && cmake --build --preset Debug
+#   cd LAB9 && cmake --preset Debug && cmake --build --preset Debug
 #
-# LAB9 还走这套统一构建，等它开启 FreeRTOS 时一并迁移。
-add_subdirectory(LAB9)
+# 所以本文件现在不再挂任何子目录，configure 能过但 build 不产出东西。
+# 它保留下来是为了：① 那份 stm32_add_firmware() 辅助函数（万一以后还要用）；
+# ② 交叉编译工具链的检查。要一次性编三个 lab，用仓库根的 build_all.sh。
