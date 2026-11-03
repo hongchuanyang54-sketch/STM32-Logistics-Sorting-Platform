@@ -71,6 +71,29 @@ compile_commands.json
 # ===== Proteus 自动备份 =====
 Project Backups/
 
-# ===== 个人简历（含联系方式，不入公开仓库）=====
+# ===== 个人求职材料（含联系方式/个人信息，不入公开仓库）=====
 cv-*.pdf
 cv-*.html
+cv-*.md
+杨洪川-*.pdf
+杨洪川-*.docx
+boss-greetings-*.md
+career-plan-*.md
+bootloader-interview-guide.md
+bootloader-dual-bank-guide.md
+
+# ===== 课程 / 教学材料（版权归课程组，不入公开仓库）=====
+0*实验*指导手册*.pdf
+0*-S2-*.pdf
+5.1 设备主从关系介绍.pdf
+视频模块的说明.docx
+
+# ===== AI 助手工作区元数据（含个人背景与项目记忆）=====
+.workbuddy/
+.claude/
+
+# ===== 简历旧版备份 =====
+backup/
+
+# ===== 临时渲染 / 截图产物 =====
+*-1.png
