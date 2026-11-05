@@ -102,9 +102,9 @@ backup/
 bootloader_demo/
 
 # ===== IDE / 编辑器配置 =====
+# 注意：.vscode/ 是有意提交的（CMake Tools 与 IntelliSense 配置，见 README 构建说明）
 .clangd
 .settings/
-.vscode/
 
 # ===== 个人面试材料与备份 =====
 项目知识问答.md
