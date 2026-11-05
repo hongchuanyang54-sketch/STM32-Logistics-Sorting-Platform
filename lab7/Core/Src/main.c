@@ -23,6 +23,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include "dma.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -30,6 +31,7 @@
 /* USER CODE BEGIN Includes */
 #include "display.h"
 #include "key.h"
+#include "uart_frame.h"
 #include "uart_send.h"
 #include "at24c02.h"
 #include <stdio.h>
@@ -57,7 +59,11 @@
 /* USER CODE BEGIN PV */
 uint8_t GoodsNumber = 0; /* 当前计数值 0~99 */
 
-uint8_t rx_byte;             /* 串口单字节接收缓冲（交给 HAL 使用） */
+/* 串口接收缓冲：DMA（或 RXNE 中断）把字节搬进这里，凑满或线路空闲时
+   由 HAL_UARTEx_RxEventCallback 一次性交给任务。
+   为什么必须是连续裸内存：DMA 只认"从 A 地址连续写到 B 地址"，
+   它不认识 RTOS 队列的内部结构，不能直接往队列里写。 */
+static uint8_t uart_rx_buf[UART_RX_BUF_SIZE];
 
 /* 下面两个内核对象由 CubeMX 在 freertos.c 里创建
    （FREERTOS -> Tasks and Queues -> Queues / Mutexes） */
@@ -72,6 +78,13 @@ void MX_FREERTOS_Init(void);
 void Counter_Set(int value);
 uint8_t Counter_Get(void);
 void Counter_ApplyCommand(const char *line);
+
+/* 启动整帧接收（定义在 USER CODE 4）。freertos.c 在队列建好后调用。
+   返回值必须检查：HAL_BUSY 表示 RxState 没回到 READY，接收会永久静默。 */
+HAL_StatusTypeDef Uart_StartReceive(void);
+/* 中断里重新武装；失败只记数（正常恒为 0，非 0 说明状态机卡在 BUSY_RX） */
+static void Uart_Rearm(void);
+static volatile uint32_t s_rx_rearm_fail;
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -171,6 +184,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   Display_Init();
@@ -186,9 +200,10 @@ int main(void)
     GoodsNumber = (saved >= 0 && saved <= 99) ? (uint8_t)saved : 0;
   }
 
-  /* 启动串口单字节中断接收：每收到一个字节触发一次 USART1 中断。
-     中断里只把字节投进 uartRxQueue，攒帧与解析在 TaskUartRx 里做。 */
-  HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+  /* 串口接收不在这里启动：要等 uartRxQueue 建好之后
+     （见 freertos.c 的 USER CODE BEGIN RTOS_THREADS）。
+     提前启动的话，从接收使能到队列创建之间到达的字节会因为句柄仍为空
+     被 osMessageQueuePut 丢掉，主机的第一帧就废了。 */
 
   /* 这里【不要】调 Display_ShowNum()：
      它内部有 osDelay，而调度器还没启动，属于非法调用
@@ -215,7 +230,7 @@ int main(void)
      已经拆成 freertos.c 里的四个任务。 */
   while (1) {
   }
-  /* USER CODE END WHILE */
+    /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
   /* USER CODE END 3 */
@@ -263,16 +278,80 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 /**
- * @brief  串口1 接收完成回调（每收到一个字节触发一次）
- * @note   中断里只做一件事：把字节投进 uartRxQueue，立刻返回。
+ * @brief  [已废弃] 改造前的逐字节接收方案（现由下方 Uart_StartReceive
+ *         与 HAL_UARTEx_RxEventCallback 取代，改为整帧接收）
+ * @note   以下为改造前的记录，保留以便对照：
  *         以前在这里逐字节攒帧、判 
 、置标志位，现在全交给 TaskUartRx。
  *         中断变短了，也不用再操心主循环什么时候来取。
  */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+/**
+ * @brief  启动（或重启）整帧接收
+ * @note   按 uart_frame.h 里的 UART_RX_USE_DMA 选择底层搬运方式：
+ *           1 → DMA1_Channel5 自动搬运，CPU 不参与
+ *           0 → RXNE 中断逐字节搬运（Proteus 仿真用这个）
+ *         两种方式下回调、判帧、队列结构完全一致，只有"谁搬字节"不同。
+ *         必须在 uartRxQueue 建好之后调用（见 freertos.c 的 RTOS_THREADS）。
+ */
+HAL_StatusTypeDef Uart_StartReceive(void) {
+#if UART_RX_USE_DMA
+  return HAL_UARTEx_ReceiveToIdle_DMA(&huart1, uart_rx_buf,
+                                      sizeof(uart_rx_buf));
+#else
+  return HAL_UARTEx_ReceiveToIdle_IT(&huart1, uart_rx_buf,
+                                     sizeof(uart_rx_buf));
+#endif
+}
+
+/**
+ * @brief 中断上下文里的"重新武装"：失败只记数，不打印（中断里不能阻塞发送）。
+ */
+static void Uart_Rearm(void) {
+  if (Uart_StartReceive() != HAL_OK) {
+    s_rx_rearm_fail++; /* 正常应恒为 0；非 0 说明 HAL 状态机没回到 READY */
+  }
+}
+
+/**
+ * @brief  整帧接收事件回调（IDLE 触发 = 一帧结束，或缓冲写满）
+ * @param  Size 本次收到的字节数
+ *
+ * @note   中断里只做三件事：拷贝整帧、投递队列、重新武装。
+ *
+ *         为什么必须 memcpy 而不能只传指针：
+ *         uart_rx_buf 是下一步接收的写入目标，只丢指针给任务的话，
+ *         任务还没解析完，下一帧就已经把它覆盖了。
+ *
+ *         ⚠ 本函数在 USART1（以及 DMA1_Channel5）中断里跑，两者的抢占
+ *         优先级都是 5（configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY），
+ *         才能调用 osMessageQueuePut；数值小于 5 会触发 configASSERT。
+ */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
   if (huart->Instance == USART1) {
-    (void)osMessageQueuePut(uartRxQueueHandle, &rx_byte, 0U, 0U);
-    HAL_UART_Receive_IT(&huart1, &rx_byte, 1); /* 重新使能接收 */
+    UartFrame_t frame;
+
+    if (Size > UART_FRAME_MAX) {
+      Size = UART_FRAME_MAX; /* 超长帧截断，防止越界 */
+    }
+    frame.len = Size;
+    memcpy(frame.data, uart_rx_buf, Size);
+
+    /* 中断上下文：超时参数必须为 0；队列满时丢帧而不是阻塞 */
+    (void)osMessageQueuePut(uartRxQueueHandle, &frame, 0U, 0U);
+
+    Uart_Rearm(); /* 重新武装，准备下一帧 */
+  }
+}
+
+/**
+ * @brief  串口错误回调（溢出 ORE / 帧错 / 噪声 / DMA 传输错误）
+ * @note   必须实现。HAL 在错误路径里会把接收状态清掉且不再自动重开，
+ *         不重新武装的话串口会【永久失聪】直到复位 ——
+ *         这就是实验九上踩过的那个坑（ORE 关闭了 RXNEIE）。
+ */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) {
+    Uart_Rearm();
   }
 }
 

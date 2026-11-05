@@ -26,6 +26,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "motor.h"
+#include "uart_frame.h"
 #include "uart_send.h"
 #include "usart.h"
 #include <string.h>
@@ -37,8 +38,8 @@ extern void App_SampleAdc(void);
 extern void App_ReportSpeed(void);
 extern void App_RefreshOled(void);
 
-/* main.c 里的串口单字节接收缓冲（定义在 main.c 的 USER CODE PV） */
-extern uint8_t rx_byte;
+/* main.c 里的串口接收启动函数（内部持有 DMA 接收缓冲） */
+extern HAL_StatusTypeDef Uart_StartReceive(void);
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -173,8 +174,14 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the queue(s) */
   /* creation of uartRxQueue */
-  uartRxQueueHandle =
-      osMessageQueueNew(32, sizeof(uint8_t), &uartRxQueue_attributes);
+  /* ⚠ 本行由 CubeMX 生成，但已手工修改：元素类型从 uint8_t（单字节）
+     改为 UartFrame_t（整帧），深度从 32 降到 4。
+     若日后用 CubeMX 重新生成代码，请在 FREERTOS → Queues 里把
+     uartRxQueue 的 Item Size 改为 66（= sizeof(UartFrame_t)）、
+     Queue Size 改为 4，否则会退回旧的“32 × 1 字节”配置，
+     TaskUartRx 取到的将是错误粒度的数据。 */
+  uartRxQueueHandle = osMessageQueueNew(
+      UART_FRAME_QUEUE_DEPTH, sizeof(UartFrame_t), &uartRxQueue_attributes);
 
   /* creation of uartTxQueue */
   uartTxQueueHandle =
@@ -213,9 +220,9 @@ void MX_FREERTOS_Init(void) {
      （CMSIS 包装层会返回 osErrorParameter，不会崩，但字节没了），
      主机的第一帧就废了。
 
-     放在这里之后，即使调度器还没启动，字节也能正常入队（队列深度 32），
+     放在这里之后，即使调度器还没启动，帧也能正常入队（队列深度 4 帧），
      TaskUartRx 起来后照样能取到 —— 一个都不丢。 */
-  HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+  (void)Uart_StartReceive();
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -270,31 +277,48 @@ void StartTaskAdc(void *argument) {
 /* USER CODE END Header_StartTaskUartRx */
 void StartTaskUartRx(void *argument) {
   /* USER CODE BEGIN StartTaskUartRx */
-  /* 任务私有的攒帧缓冲。字节是队列一个个送过来的，
-     这里不需要双缓冲、不需要关中断 —— 队列已经保证了原子性。
-     （裸机版那套 rx_buf + rx_frame_ready + 关中断 memcpy 可以整个删掉。） */
-  static char line[50]; /* 最长一帧 49 字符，够放 JSON */
-  static uint8_t idx = 0;
-  uint8_t b;
+  /* 队列里现在放的是【整帧】而不是单个字节：
+     DMA 把字节搬进 uart_rx_buf，IDLE 中断触发时 HAL 一次性告诉我们
+     这一帧有多少字节，回调里 memcpy 成 UartFrame_t 投递过来。
+     因此这里不再需要"攒字节"的私有缓冲，也不需要判 idx 越界。 */
+  UartFrame_t frame;
 
   for (;;) {
-    /* 阻塞等一个字节。没有数据时本任务完全不被调度，不占 CPU */
-    if (osMessageQueueGet(uartRxQueueHandle, &b, NULL, osWaitForever) != osOK) {
-      continue; //
+    /* 阻塞等一帧。没有数据时本任务完全不被调度，不占 CPU */
+    if (osMessageQueueGet(uartRxQueueHandle, &frame, NULL, osWaitForever) !=
+        osOK) {
+      continue;
     }
-    // 下面的逻辑是把收到的字节攒成一行，遇到 CR/LF 就交给 App_HandleLine()
-    // 处理。
-    if (b == '\r' || b == '\n') {
-      if (idx > 0) /* 一行结束，交给解析 */
-      {
-        line[idx] = '\0';
-        App_HandleLine(line);
-        idx = 0; /* CRLF 里的 \n 会因 idx==0 被自然忽略 */
+
+    /* 补字符串结束符（回调只拷贝了 len 个字节，没有写 '\0'） */
+    if (frame.len >= UART_FRAME_MAX) {
+      frame.len = UART_FRAME_MAX - 1;
+    }
+    frame.data[frame.len] = '\0';
+
+    /* 一帧里可能包含多行（主机连发两条命令、彼此间隔小于 1 个字符时间时
+       IDLE 就不会把它们分开），所以按 CR/LF 逐行切，空行跳过。
+       正常单条命令的场景下，这个循环只跑一次。 */
+    char *p = frame.data;
+    // 下面的操作是处理一帧串口数据，逐行切分并调用 App_HandleLine()
+    // 处理每一行。
+    while (*p != '\0') {
+      char *nl = p;
+      while (*nl != '\0' && *nl != '\r' &&
+             *nl != '\n') { // 作用是找到当前行的结束位置，nl 指向 '\0'、'\r' 或
+                            // '\n'。
+        nl++;
       }
-    } else if (idx < sizeof(line) - 1) { // 只要没满就继续攒
-      line[idx++] = (char)b;
-    } else {
-      idx = 0; /* 过长的帧直接丢弃，从头再来 */
+
+      char saved = *nl;
+      *nl = '\0'; // 作用是暂时把当前行的结束符替换为 '\0'，方便处理当前行。
+      if (*p != '\0') {
+        App_HandleLine(p);
+      }
+      if (saved == '\0') {
+        break;
+      }
+      p = nl + 1; // 为了批量处理多行，p 指向下一行的开头。
     }
   }
   /* USER CODE END StartTaskUartRx */

@@ -44,14 +44,17 @@
 #include "main.h"
 #include "adc.h"
 #include "cmsis_os.h"
+#include "dma.h"
 #include "gpio.h"
 #include "tim.h"
 #include "usart.h"
+
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "motor.h"
 #include "oled.h"
+#include "uart_frame.h"
 #include "uart_send.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,11 +91,15 @@ static volatile CtrlMode_t ctrl_mode =
               // 值决定转速。
 static volatile uint32_t adc_value = 0; // 作用是存储当前的 ADC 值，初始值为 0。
 
-/* 串口单字节接收缓冲（交给 HAL 使用）。
-   裸机版那套 rx_buf/rx_idx/rx_frame_ready + 关中断拷贝已经删掉了：
-   现在中断只把字节投进 uartRxQueue，攒帧由 TaskUartRx 用自己的私有缓冲完成，
-   天然没有竞态。 */
-uint8_t rx_byte;
+/* ── 串口接收：DMA + IDLE 整帧方案 ──
+   USART1_RX 由 DMA1_Channel5 自动搬进 uart_rx_buf，CPU 全程不参与搬运。
+   线路空闲 ≥1 个字符时间时触发 IDLE，HAL 在
+   HAL_UARTEx_RxEventCallback(huart, Size) 里告诉我们这一帧有多少字节。
+
+   为什么必须是连续裸内存：DMA 只认"从 A 地址连续写到 B 地址"，
+   它不认识 RTOS 队列的内部结构，所以不能直接往队列里写。 */
+static uint8_t uart_rx_buf[UART_RX_BUF_SIZE]; // 这个是 DMA 的接收缓冲区，大小为
+                                              // UART_RX_BUF_SIZE 字节。
 
 /* 队列由 CubeMX 在 freertos.c 里创建
    （FREERTOS -> Tasks and Queues -> Queues） */
@@ -106,6 +113,15 @@ void MX_FREERTOS_Init(void);
 static void HandleLegacyCommand(
     const char *cmd); // 作用是处理旧文本命令（F<n> / R<n> / STOP /
                       // ADC），参数// cmd 是以 '\0' 结尾的一行报文。
+
+/* 启动 DMA + IDLE 接收（定义在 USER CODE 4）。
+   freertos.c 在队列建好之后调用它。
+   返回值必须检查：HAL_BUSY 表示 RxState 没回到 READY，DMA 不会重新装载。 */
+HAL_StatusTypeDef Uart_StartReceive(void);
+
+/* 中断里重新武装；失败只记数（正常恒为 0，非 0 说明状态机卡在 BUSY_RX） */
+static void Uart_Rearm(void);
+static volatile uint32_t s_rx_rearm_fail;
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -321,6 +337,7 @@ int main(void) {
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ADC1_Init();
   MX_TIM2_Init();
   MX_USART1_UART_Init();
@@ -330,9 +347,9 @@ int main(void) {
 
   /* 串口接收不在这里使能！
      要等到 uartRxQueue 建好之后（见 freertos.c 的 USER CODE BEGIN
-     RTOS_THREADS）。 在这里调 HAL_UART_Receive_IT 的话，从中断使能到
+     RTOS_THREADS）。 在这里调 Uart_StartReceive() 的话，从 DMA/IDLE 打开到
      MX_FREERTOS_Init() 建好队列 之间有个几微秒的窗口：这期间中断回调会拿 NULL
-     句柄调 osMessageQueuePut， 字节被静默丢掉，主机的第一帧就废了。 */
+     句柄调 osMessageQueuePut， 帧被静默丢掉，主机的第一帧就废了。 */
 
   /* 这里【不要】再画一次开机界面。TaskOled 一启动就会调 App_RefreshOled()
      画出同样的内容，多写一处只会制造不一致 —— 原来那两处的第四行
@@ -407,22 +424,71 @@ void SystemClock_Config(void) {
 /* USER CODE BEGIN 4 */
 
 /**
- * @brief  串口1 接收完成回调（每收到一个字节触发一次）
- * @note   中断里只做一件事：把字节投进 uartRxQueue，立刻返回。
- *         攒帧（判 \r \n）现在由 TaskUartRx 负责。
+ * @brief  启动（或重启）USART1 的 DMA + IDLE 接收
+ * @note   一次调用同时完成：启动 DMA 搬运 + 使能 IDLE 中断。
+ *         必须在 uartRxQueue 建好之后调用（见 freertos.c 的 RTOS_THREADS）。
+ * @retval HAL_OK 启动成功；HAL_BUSY 表示 RxState 没回到 READY（DMA 不会重新装载）
  *
- *         osMessageQueuePut 是 ISR 安全的（靠 __get_IPSR() 自动分辨），
- *         但在中断里超时参数必须是 0。
- *
- *         ⚠ 本函数在 USART1 中断里跑，它的抢占优先级必须是 5
- *         （configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY），
- *         见 usart.c 里的 HAL_NVIC_SetPriority。优先级比 5 高（数值更小）
- *         的 ISR 调 FreeRTOS API 是非法的。
+ * ⚠ 返回值必须检查。早期版本写成 (void)HAL_UARTEx_ReceiveToIdle_DMA(...)，
+ *   而当时 DMA 配的是 CIRCULAR，这个调用**每次都返回 HAL_BUSY**，
+ *   返回值被丢掉后，"DMA 从未重新开始"这件事完全无声。
  */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+HAL_StatusTypeDef Uart_StartReceive(void) {
+  return HAL_UARTEx_ReceiveToIdle_DMA(&huart1, uart_rx_buf,
+                                      sizeof(uart_rx_buf));
+}
+
+/**
+ * @brief 中断上下文里的"重新武装"：失败只记数，不打印（中断里不能阻塞发送）。
+ */
+static void Uart_Rearm(void) {
+  if (Uart_StartReceive() != HAL_OK) {
+    s_rx_rearm_fail++; /* 正常应恒为 0；非 0 说明 HAL 状态机卡在 BUSY_RX */
+  }
+}
+
+/**
+ * @brief  DMA + IDLE 接收事件回调（一帧结束、或缓冲写满时触发）
+ * @param  Size 本次收到的字节数（IDLE 触发时 = 这一帧的长度）
+ *
+ * @note   中断里只做三件事：拷贝整帧、投递队列、重新武装。
+ *
+ *         为什么必须 memcpy 而不能只传指针：
+ *         uart_rx_buf 是 DMA 的下一个写入目标。如果只把指针丢给任务，
+ *         任务还没解析完，下一帧就已经把数据覆盖了。
+ *
+ *         ⚠ USART1 与 DMA1_Channel5 的抢占优先级都是 5
+ *         （configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY = 5），
+ *         才能在这里调用 osMessageQueuePut；优先级数值小于 5 是非法的，
+ *         会触发 configASSERT 死循环。
+ */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
   if (huart->Instance == USART1) {
-    (void)osMessageQueuePut(uartRxQueueHandle, &rx_byte, 0U, 0U);
-    HAL_UART_Receive_IT(&huart1, &rx_byte, 1); /* 重新使能接收 */
+    UartFrame_t frame;
+
+    if (Size > UART_FRAME_MAX) {
+      Size = UART_FRAME_MAX; /* 超长帧截断，防止越界 */
+    }
+    frame.len = Size;
+    memcpy(frame.data, uart_rx_buf, Size);
+
+    /* 中断上下文：超时参数必须为 0；队列满时丢帧而不是阻塞 */
+    (void)osMessageQueuePut(uartRxQueueHandle, &frame, 0U, 0U);
+
+    Uart_Rearm(); /* 重新武装，准备接收下一帧 */
+  }
+}
+
+/**
+ * @brief  串口错误回调（溢出 ORE / 帧错 / 噪声 / DMA 传输错误）
+ * @note   必须实现。HAL 在错误路径里会把接收状态清掉且不再自动重开，
+ *         不重新武装的话串口会【永久失聪】直到复位 ——
+ *         这正是 LAB9 上踩过的那个坑（当时 ORE 关闭了 RXNEIE）。
+ *         改成 DMA 后风险依然存在，只是触发点从 RXNEIE 变成 DMA 状态机。
+ */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) {
+    Uart_Rearm();
   }
 }
 

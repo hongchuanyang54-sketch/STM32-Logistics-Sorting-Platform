@@ -44,10 +44,10 @@
 
 | 设计原则 | 做法 |
 |---|---|
-| **中断只做最小工作** | ISR 里只 `osMessageQueuePut` 投递原始数据，攒帧/解析全部交给任务 |
+| **中断只做最小工作** | ISR 里只做一次 `osMessageQueuePut`（lab7/lab8 投整帧，LAB9 投单字节），解析全部交给任务 |
 | **串口发送单一出口** | 每个设备有且只有一个任务碰 `huart`，其他任务投递到发送队列，避免多任务抢同一个串口 |
 | **慢路径压到最低优先级** | OLED 刷新/数码管扫描这类耗时的活放到最低优先级，当作"填缝"任务 |
-| **能用 `static` 就不放栈上** | 队列元素缓冲（256B 级）写成任务私有 `static`，不占任务栈 |
+| **DMA 接收缓冲必须是 static** | DMA 只认连续裸内存、不认队列结构，`uart_rx_buf[128]` 写成文件级 `static` |
 
 | 设备 | 任务数 | 队列数 | 堆 (heap_4) |
 |---|---|---|---|
@@ -83,7 +83,7 @@
 | `TaskUartRx` | Normal (24) | 256 | 串口下行攒帧与解析 |
 | `TaskUartTx` | Low (8) | 192 | **唯一**操作 `huart1` 的任务 |
 
-队列 `uartRxQueue`(32×`uint8_t`) · `uartEvtQueue`(8×`UartEvent_t`) · 互斥量 `counterMutex` 保护计数值
+队列 `uartRxQueue`(4×`UartFrame_t`) · `uartEvtQueue`(8×`UartEvent_t`) · 互斥量 `counterMutex` 保护计数值
 
 **模块**: `Core/Src/main.c`（计数值读写+协议）· `KEY/key.c`（消抖+长短按状态机）· `DISPLAY/display.c`（动态扫描）· `UART_SEND/uart_send.c`（事件投递）· `I2C/soft_i2c.c` + `EEPROM/at24c02.c`（掉电保存）
 
@@ -93,7 +93,7 @@
 
 | 功能 | 说明 |
 |------|------|
-| ADC 模拟调速 | PA5(ADC1) 采集电位器电压，12 位分辨率，映射为档位 |
+| ADC 模拟调速 | PA6(ADC1_IN6) 采集电位器电压，12 位分辨率，映射为档位（软件触发、单次转换、采样时间 1.5 周期） |
 | PWM 输出 | PA0 (TIM2_CH1) → L298N 的 ENA，**PWM 频率 100Hz**（PSC=7200-1, ARR=100-1） |
 | 方向控制 | PA1/PA2 → L298N 的 IN1/IN2，PA1 高为 FWD、PA2 高为 REV |
 | 档位 | 0~10，每档 10% 占空比。电位器路径满量程到 **9 档**，串口路径可到 10 档 |
@@ -116,7 +116,7 @@
 | `TaskUartTx` | BelowNormal (16) | 192 | 事件 | **唯一**操作 `huart1` 的任务 |
 | `TaskOled` | Low (8) | 256 | 自定 | OLED 刷新（约 0.13s） |
 
-队列 `uartRxQueue`(32×`uint8_t`) · `uartTxQueue`(8×`UartTxMsg_t`)
+队列 `uartRxQueue`(4×`UartFrame_t`，每帧 66 B) · `uartTxQueue`(8×`UartTxMsg_t`)
 
 **模块**: `Core/Src/main.c`（应用逻辑 `App_*`）· `MOTOR/motor.c`（电机状态机）· `OLED/oled.c`（SSD1306 驱动）· `SOFT_I2C/soft_i2c.c`（位翻转 I²C）· `UART_SEND/uart_send.c`（发送队列）
 

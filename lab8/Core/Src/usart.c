@@ -25,6 +25,7 @@
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_rx;
 
 /* USART1 init function */
 
@@ -83,6 +84,38 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+    /* USART1 DMA Init */
+    /* USART1_RX Init */
+    /*
+     * ⚠ 必须是 DMA_NORMAL，不能用 DMA_CIRCULAR（CubeMX 默认给的正是 CIRCULAR）。
+     *
+     * 依据 stm32f1xx_hal_uart.c 的 IDLE 分支（约 2499–2518 行）：
+     *   只有 (hdmarx->Init.Mode != DMA_CIRCULAR) 时 HAL 才执行
+     *     RxState = READY + 关 IDLEIE + HAL_DMA_Abort()
+     *   Circular 下这一整块被跳过，RxState 永远停在 BUSY_RX。
+     * 后果：
+     *   1) 回调里再调 HAL_UARTEx_ReceiveToIdle_DMA() 会在入口
+     *      （1781 行 RxState == READY 的判断）直接返回 HAL_BUSY；
+     *   2) 回调的 Size = RxXferSize - RxXferCount，而 Circular 的 DMA 计数器
+     *      一直往前跑、从不复位，所以 Size 是"累计收到字节数"而不是本帧长度，
+     *      按它从 buf[0] 拷贝会把前面几帧重复发一遍 → 指令粘连/重复执行。
+     * 改用 NORMAL 后，每帧 IDLE 时 HAL 自动停 DMA、复位计数、状态还给 READY。
+     */
+    hdma_usart1_rx.Instance = DMA1_Channel5;
+    hdma_usart1_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
+    hdma_usart1_rx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_usart1_rx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_usart1_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_usart1_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_usart1_rx.Init.Mode = DMA_NORMAL;
+    hdma_usart1_rx.Init.Priority = DMA_PRIORITY_MEDIUM;
+    if (HAL_DMA_Init(&hdma_usart1_rx) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    __HAL_LINKDMA(uartHandle,hdmarx,hdma_usart1_rx);
+
     /* USART1 interrupt Init */
     HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
@@ -108,6 +141,9 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
     PA10     ------> USART1_RX
     */
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_9|GPIO_PIN_10);
+
+    /* USART1 DMA DeInit */
+    HAL_DMA_DeInit(uartHandle->hdmarx);
 
     /* USART1 interrupt Deinit */
     HAL_NVIC_DisableIRQ(USART1_IRQn);

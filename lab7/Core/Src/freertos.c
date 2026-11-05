@@ -1,20 +1,20 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * File Name          : freertos.c
-  * Description        : Code for freertos applications
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * File Name          : freertos.c
+ * Description        : Code for freertos applications
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2026 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
 /* USER CODE END Header */
 
 /* Includes ------------------------------------------------------------------*/
@@ -26,16 +26,20 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* 诊断用，定义在 main.c；定位完会删 */
-#include "usart.h"
 #include "display.h"
 #include "key.h"
+#include "uart_frame.h"
 #include "uart_send.h"
+#include "usart.h"
+
 extern void Counter_ApplyCommand(const char *line);
 
 /* 计数器由 main.c 持有，键任务和串口任务都要用它 */
 extern uint8_t Counter_Get(void);
-extern void    Counter_Set(int value);
+extern void Counter_Set(int value);
 
+/* main.c 里的整帧接收启动函数（内部持有接收缓冲，DMA/IT 由宏切换） */
+extern HAL_StatusTypeDef Uart_StartReceive(void);
 
 /* USER CODE END Includes */
 
@@ -119,17 +123,14 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, signed char *pcTaskName);
 void vApplicationMallocFailedHook(void);
 
 /* USER CODE BEGIN 4 */
-void vApplicationStackOverflowHook(TaskHandle_t xTask, signed char *pcTaskName)
-{
-   Error_Handler();
+void vApplicationStackOverflowHook(TaskHandle_t xTask,
+                                   signed char *pcTaskName) {
+  Error_Handler();
 }
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN 5 */
-void vApplicationMallocFailedHook(void)
-{
-   Error_Handler();
-}
+void vApplicationMallocFailedHook(void) { Error_Handler(); }
 /* USER CODE END 5 */
 
 /**
@@ -159,7 +160,12 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the queue(s) */
   /* creation of uartRxQueue */
-  uartRxQueueHandle = osMessageQueueNew (32, sizeof(uint8_t), &uartRxQueue_attributes);
+  /* ⚠ 本行由 CubeMX 生成，但已手工修改：元素类型从 uint8_t（单字节）
+     改为 UartFrame_t（整帧），深度从 32 降到 4。
+     若日后用 CubeMX 重新生成代码，请在 FREERTOS → Queues 里把
+     uartRxQueue 的 Item Size 改为 66（= sizeof(UartFrame_t)）、
+     Queue Size 改为 4，否则会退回旧的“32 × 1 字节”配置。 */
+  uartRxQueueHandle = osMessageQueueNew (UART_FRAME_QUEUE_DEPTH, sizeof(UartFrame_t), &uartRxQueue_attributes);
 
   /* creation of uartEvtQueue */
   uartEvtQueueHandle = osMessageQueueNew (8, sizeof(UartEvent_t), &uartEvtQueue_attributes);
@@ -184,6 +190,11 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_THREADS */
 
   /* add threads, ... */
+
+  /* 串口接收必须在 uartRxQueue 建好之后启动。
+     若提前到 main() 的 USER CODE 2 里开，从接收使能到队列创建之间
+     到达的字节会因为句柄仍为空被 osMessageQueuePut 丢掉。 */
+  (void)Uart_StartReceive();
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -194,10 +205,10 @@ void MX_FREERTOS_Init(void) {
 
 /* USER CODE BEGIN Header_StartTaskDisplay */
 /**
-  * @brief  Function implementing the TaskDisplay thread.
-  * @param  argument: Not used
-  * @retval None
-  */
+ * @brief  Function implementing the TaskDisplay thread.
+ * @param  argument: Not used
+ * @retval None
+ */
 /* USER CODE END Header_StartTaskDisplay */
 void StartTaskDisplay(void *argument)
 {
@@ -205,8 +216,7 @@ void StartTaskDisplay(void *argument)
   /* Display_ShowNum 一次调用扫描一轮（十位 1ms + 个位 1ms）。
      本任务优先级最高，保证扫描节拍不被别人拖慢 —— 刷新低于 ~50Hz 肉眼就见闪。
      函数内部用 osDelay 让出 CPU，所以不会饿死下面的任务。 */
-  for(;;)
-  {
+  for (;;) {
     Display_ShowNum(Counter_Get());
   }
   /* USER CODE END StartTaskDisplay */
@@ -214,35 +224,39 @@ void StartTaskDisplay(void *argument)
 
 /* USER CODE BEGIN Header_StartTaskKey */
 /**
-* @brief Function implementing the TaskKey thread.
-* @param argument: Not used
-* @retval None
-*/
+ * @brief Function implementing the TaskKey thread.
+ * @param argument: Not used
+ * @retval None
+ */
 /* USER CODE END Header_StartTaskKey */
-void StartTaskKey(void *argument)//作用是在一个无限循环中周期性地调用 Key_Process() 函数来处理按键事件，并根据按键事件更新计数值和发送串口事件。
+void StartTaskKey(void *argument)
 {
   /* USER CODE BEGIN StartTaskKey */
-  for(;;)
-  {
+  for (;;) {
     /* 只有计数值确实改变时才上报，
        否则到 99 后长按会向串口刷屏、上位机镜像计数也会跑偏 */
-    switch (Key_Process())
-    {
-      case KEY_EVENT_ADD:
-        if (Counter_Get() < 99) { Counter_Set(Counter_Get() + 1); Uart_EventPush(UART_EVT_ADD); }
-        break;
+    switch (Key_Process()) {
+    case KEY_EVENT_ADD:
+      if (Counter_Get() < 99) {
+        Counter_Set(Counter_Get() + 1);
+        Uart_EventPush(UART_EVT_ADD);
+      }
+      break;
 
-      case KEY_EVENT_SUB:
-        if (Counter_Get() > 0)  { Counter_Set(Counter_Get() - 1); Uart_EventPush(UART_EVT_SUB); }
-        break;
+    case KEY_EVENT_SUB:
+      if (Counter_Get() > 0) {
+        Counter_Set(Counter_Get() - 1);
+        Uart_EventPush(UART_EVT_SUB);
+      }
+      break;
 
-      case KEY_EVENT_CLEAR:
-        Counter_Set(0);
-        Uart_EventPush(UART_EVT_ZERO);
-        break;
+    case KEY_EVENT_CLEAR:
+      Counter_Set(0);
+      Uart_EventPush(UART_EVT_ZERO);
+      break;
 
-      default:
-        break;
+    default:
+      break;
     }
 
     /* 10ms 轮询一次足够：人的按键反应在 100ms 以上 */
@@ -253,46 +267,53 @@ void StartTaskKey(void *argument)//作用是在一个无限循环中周期性地
 
 /* USER CODE BEGIN Header_StartTaskUartRx */
 /**
-* @brief Function implementing the TaskUartRx thread.
-* @param argument: Not used
-* @retval None
-*/
+ * @brief Function implementing the TaskUartRx thread.
+ * @param argument: Not used
+ * @retval None
+ */
 /* USER CODE END Header_StartTaskUartRx */
 void StartTaskUartRx(void *argument)
 {
   /* USER CODE BEGIN StartTaskUartRx */
-  /* 任务私有的攒帧缓冲。字节是队列一个个送过来的，
-     这里不需要双缓冲、不需要关中断 —— 队列已经保证了原子性。 */
-  static char    line[50];//作用是存储从串口接收到的一行数据，直到遇到换行符为止。
-  static uint8_t idx = 0;
-  uint8_t b;//作用是存储从串口接收到的单个字节数据，用于逐个处理和组装成完整的命令行。
+  /* 队列里现在放的是【整帧】而不是单个字节：
+     DMA（或 RXNE 中断）把字节搬进 uart_rx_buf，IDLE 触发时 HAL 一次性
+     告知这一帧的长度，回调里 memcpy 成 UartFrame_t 投递过来。
+     所以这里不再需要"攒字节"的私有缓冲。 */
+  UartFrame_t frame;
 
-  for(;;)
-  {
-    /* 阻塞等一个字节。没有数据时本任务完全不被调度，不占 CPU ——
+  for (;;) {
+    /* 阻塞等一帧。没有数据时本任务完全不被调度，不占 CPU ——
        这是队列相比裸机版轮询标志位最本质的差别。 */
-    if (osMessageQueueGet(uartRxQueueHandle, &b, NULL, osWaitForever) != osOK)
-    {
-      continue;//目的是跳过本次循环，继续等待下一个字节的接收，确保只有在成功获取到一个字节时才进行后续处理。
+    if (osMessageQueueGet(uartRxQueueHandle, &frame, NULL, osWaitForever) !=
+        osOK) {
+      continue;
     }
 
+    /* 补字符串结束符（回调只拷贝了 len 个字节，没有写 '\0'） */
+    if (frame.len >= UART_FRAME_MAX) {
+      frame.len = UART_FRAME_MAX - 1;
+    }
+    frame.data[frame.len] = '\0';
 
-    if (b == '\r' || b == '\n')//如果接收到的字节是回车符或换行符，表示一行命令已经结束
-    {
-      if (idx > 0) //如果当前缓冲区中有数据（即 idx > 0），则将缓冲区中的数据作为一行完整的命令进行处理
-      {
-        line[idx] = '\0';
-        Counter_ApplyCommand(line);
-        idx = 0;
+    /* 一帧里可能包含多行（主机连发两条命令、间隔小于 1 个字符时间时
+       IDLE 不会把它们分开），按 CR/LF 逐行切，空行跳过。
+       正常单条命令的场景下这个循环只跑一次。 */
+    char *p = frame.data;
+    while (*p != '\0') {
+      char *nl = p;
+      while (*nl != '\0' && *nl != '\r' && *nl != '\n') {
+        nl++;
       }
-    }
-    else if (idx < sizeof(line) - 1)//如果接收到的字节不是回车符或换行符，并且当前缓冲区还有空间（即 idx 小于缓冲区大小减一），则将接收到的字节存入缓冲区，并将索引 idx 增加 1，准备接收下一个字节。
-    {
-      line[idx++] = (char)b;
-    }
-    else
-    {
-      idx = 0;                         /* 过长的帧直接丢弃，从头再来 */
+
+      char saved = *nl;
+      *nl = '\0';
+      if (*p != '\0') {
+        Counter_ApplyCommand(p);
+      }
+      if (saved == '\0') {
+        break;
+      }
+      p = nl + 1;
     }
   }
   /* USER CODE END StartTaskUartRx */
@@ -300,21 +321,21 @@ void StartTaskUartRx(void *argument)
 
 /* USER CODE BEGIN Header_StartTaskUartTx */
 /**
-* @brief Function implementing the TaskUartTx thread.
-* @param argument: Not used
-* @retval None
-*/
+ * @brief Function implementing the TaskUartTx thread.
+ * @param argument: Not used
+ * @retval None
+ */
 /* USER CODE END Header_StartTaskUartTx */
-void StartTaskUartTx(void *argument)//作用是在一个无限循环中等待串口事件队列中的事件，并将这些事件发送到串口。
+void StartTaskUartTx(void *argument)
 {
   /* USER CODE BEGIN StartTaskUartTx */
   UartEvent_t evt;
 
-  for(;;)
-  {
+  for (;;) {
     /* 阻塞等一个待上报事件。相比裸机版每轮主循环都去查一次"有没有事件"，
        这里任务是真的睡着了，由内核在入队那一刻唤醒。 */
-    if (osMessageQueueGet(uartEvtQueueHandle, &evt, NULL, osWaitForever) == osOK)//判断是否成功从串口事件队列中获取到一个事件
+    if (osMessageQueueGet(uartEvtQueueHandle, &evt, NULL, osWaitForever) ==
+        osOK) // 判断是否成功从串口事件队列中获取到一个事件
     {
       Uart_SendEvent(evt);
     }

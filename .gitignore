@@ -97,3 +97,16 @@ backup/
 
 # ===== 临时渲染 / 截图产物 =====
 *-1.png
+
+# ===== 独立仓库：bootloader 单独托管（STM32-Dual-Bank-Bootloader）=====
+bootloader_demo/
+
+# ===== IDE / 编辑器配置 =====
+.clangd
+.settings/
+.vscode/
+
+# ===== 个人面试材料与备份 =====
+项目知识问答.md
+技术知识问答.md
+*.md.bak
